@@ -1,0 +1,1 @@
+"""Handwritten notes automation package."""

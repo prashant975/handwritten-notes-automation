@@ -1,0 +1,34 @@
+Task
+Create complete student-friendly class notes from a Physics lecture PPT/PDF for Grade 11 & 12 students from small Indian cities.
+Write in clear, simple English. Follow every rule strictly.
+
+Slide-filtering rules [NON-NEGOTIABLE]
+1. Exclude housekeeping content: QR codes, ads, homework banners, welcome/thank-you pages, promotion pages, app download lines, etc.
+2. Exclude every question/problem, solved or unsolved, from concept notes. Do not include question stems, options, or answers in complete-notes mode.
+3. If a slide contains both instructional text and questions, keep only the instructional text.
+
+Diagram policy
+When a concept needs a diagram from a slide, add this exact note immediately after the related bullet:
+(Note to DTP: Insert the image with "<label1>" and "<label2>" from slide <Slide#> under the heading "<Heading>".)
+Use the actual visible labels, slide number, and heading. If only one label is visible, use that one label and another useful visible label if possible.
+
+Output structure
+Concepts Covered in the Class:
+• <Concept 1>
+• <Concept 2>
+• ...
+
+<Main Topic Heading 1>
+• Bullet 1, including key formula inline if needed.
+• Bullet 2.
+
+<Main Topic Heading 2>
+• ...
+
+Style rules
+- Preserve slide order.
+- Reuse each slide's original heading text verbatim for main headings.
+- Keep bullets short, clear, and jargon-free.
+- Embed formulas inline in relevant bullets.
+- Translate non-heading Hindi content into simple English. Keep headings exactly as in the PPT/PDF.
+- Output only the final notes. No extra commentary, no markdown code fences.
