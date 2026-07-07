@@ -47,7 +47,7 @@ def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=Fa
 def _set_paragraph_base(p, *, bullet: bool = False, indent_level: int = 0):
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.line_spacing = 1.2
+    p.paragraph_format.line_spacing = 1.0
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     if bullet:
         # Each nesting level shifts the bullet right by ~0.7 cm while keeping the
@@ -114,6 +114,9 @@ def _is_heading(line: str) -> bool:
 def _add_heading(doc: Document, line: str):
     p = doc.add_paragraph()
     _set_paragraph_base(p)
+    # Controlled spacing above/below the heading instead of a blank paragraph.
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(4)
     clean = line.strip().strip("#").strip()
     run = p.add_run(clean)
     _set_run_font(run, size=HEADING_SIZE, bold=True, underline=True, color=RGBColor(0, 0, 0))
@@ -210,7 +213,6 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
 
     add_title_block(doc, subject, chapter_title)
 
-    previous_was_heading = False
     inserted_images = 0
     for raw_line in notes_text.splitlines():
         line = raw_line.rstrip()
@@ -228,21 +230,15 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
                         warnings.append(f"Could not insert image for slide {note.slide_no}.")
                 else:
                     warnings.append(f"DTP note found but slide image could not be matched: {line[:140]}")
-            previous_was_heading = False
             continue
         if _is_heading(line):
-            if not previous_was_heading and len(doc.paragraphs) > 0:
-                doc.add_paragraph("")
             _add_heading(doc, line)
-            previous_was_heading = True
         elif _is_bullet(line):
             leading = len(raw_line) - len(raw_line.lstrip(" \t"))
             indent_level = min(3, leading // 4) if leading else 0
             _add_body(doc, line, bullet=True, indent_level=indent_level)
-            previous_was_heading = False
         else:
             _add_body(doc, line, bullet=False)
-            previous_was_heading = False
     doc.save(str(output_path))
     warnings.append(f"Inserted {inserted_images} image(s) from DTP notes.")
     if not is_kalam_installed():
