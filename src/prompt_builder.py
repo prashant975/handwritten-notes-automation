@@ -37,11 +37,19 @@ def build_generation_prompt(subject: str, mode: str, language_code: str, slides:
     label = f"\nYou are processing chunk: {chunk_label}." if chunk_label else ""
     subject_rules = ""
     if subject.lower() == "physics":
-        subject_rules = (
+        subject_rules += (
             "\n- PHYSICS: Do NOT include any numerical problem solutions, solved examples, "
             "or step-by-step working. Include only the concept summary and instructional "
             "notes (definitions, formulas, key points). Keep formulas as reference, but omit "
             "worked-out solutions and the arithmetic of solving a specific question."
+        )
+    if mode.lower() == "summary":
+        subject_rules += (
+            "\n- SUMMARY MODE (STRICT): Keep it short. Capture only the key concepts and "
+            "essential points as brief one-line bullets. Do NOT write long explanations, "
+            "background, examples, or elaboration. Prefer the fewest words that preserve the "
+            "meaning. Aim for roughly 8-10% of the source length. Every bullet must be a single "
+            "short line."
         )
     return f"""{template}
 
@@ -62,6 +70,7 @@ SLIDE DATA STARTS BELOW
 def build_merge_prompt(subject: str, mode: str, language_code: str, partial_notes: list[str]) -> str:
     template = load_prompt_template(subject, mode, language_code)
     joined = "\n\n".join(f"--- PART {i+1} ---\n{note}" for i, note in enumerate(partial_notes))
+    brevity = "\n- SUMMARY MODE (STRICT): Keep the merged notes short and concise; one-line bullets, no long explanations or elaboration." if mode.lower() == "summary" else ""
     return f"""{template}
 
 You are merging partial notes from consecutive slide chunks into one final set of notes.
@@ -70,7 +79,7 @@ Rules:
 - Remove repeated Concepts Covered items.
 - Merge duplicate headings only when they are the same heading from continuation slides.
 - Keep DTP notes with their slide numbers exactly.
-- Output only the final notes, no extra commentary.
+- Output only the final notes, no extra commentary.{brevity}
 
 PARTIAL NOTES START BELOW
 
