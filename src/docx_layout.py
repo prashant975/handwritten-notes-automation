@@ -14,9 +14,10 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Emu, Pt, RGBColor
 
-TITLE_COLOR = RGBColor(0xC0, 0x00, 0x00)   # PW red for subject/chapter title
+TITLE_COLOR = RGBColor(0xFF, 0x00, 0x00)   # PW red for subject/chapter title (#FF0000)
 FOOTER_COLOR = RGBColor(0x1F, 0x4E, 0x79)  # blue-ish "Master NCERT..." link colour
 BODY_FONT = "Kalam"
+CHAR_SPACING_TWIPS = 30  # Expanded character spacing = 1.5 pt
 
 
 def is_kalam_installed() -> bool:
@@ -72,6 +73,11 @@ def _apply_font(run, *, size, bold=False, italic=False, underline=False, color=N
     run.font.underline = underline
     if color is not None:
         run.font.color.rgb = color
+    sp = rpr.find(qn("w:spacing"))
+    if sp is None:
+        sp = OxmlElement("w:spacing")
+        rpr.append(sp)
+    sp.set(qn("w:val"), str(CHAR_SPACING_TWIPS))
 
 
 def add_title_block(doc, subject: str, chapter_title: str):

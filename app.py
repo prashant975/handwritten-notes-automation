@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -53,8 +54,9 @@ def _notes_to_markdown(notes: str) -> str:
         leading = len(raw) - len(raw.lstrip(" \t"))
         level = min(3, leading // 4)
         content = line.strip()
-        if content.startswith(("•", "·", "-", "–")):
-            out.append("  " * level + "- " + content[1:].strip())
+        bullet_m = re.match(r"^(\*|•|·|-|–)\s+(.*)$", content)
+        if bullet_m:
+            out.append("  " * level + "- " + bullet_m.group(2).strip())
         elif content[0].isdigit() and content[1:2] in {".", ")"}:
             out.append("  " * level + content)
         elif "note to dtp" in content.lower():

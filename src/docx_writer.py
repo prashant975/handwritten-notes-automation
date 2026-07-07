@@ -5,6 +5,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Inches, Pt, RGBColor
 
@@ -16,9 +17,19 @@ from .models import SlideData
 BODY_FONT = "Kalam"
 BODY_SIZE = Pt(16)
 HEADING_SIZE = Pt(18)
-DARK_GREY = RGBColor(0x00, 0x33, 0x99)
-BOLD_COLOR = RGBColor(191, 78, 20)
+DARK_GREY = RGBColor(0x00, 0x00, 0x99)   # body text (#000099)
+BOLD_COLOR = RGBColor(0xE9, 0x71, 0x32)  # bold words (#E97132)
 BULLET_PREFIXES = ("•", "·", "-", "–")
+CHAR_SPACING_TWIPS = 30  # Expanded character spacing = 1.5 pt (1 pt = 20 twips)
+
+
+def _set_char_spacing(run, twips: int = CHAR_SPACING_TWIPS):
+    rpr = run._element.get_or_add_rPr()
+    sp = rpr.find(qn("w:spacing"))
+    if sp is None:
+        sp = OxmlElement("w:spacing")
+        rpr.append(sp)
+    sp.set(qn("w:val"), str(twips))
 
 
 def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=False, color=DARK_GREY):
@@ -30,6 +41,7 @@ def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=Fa
     run.font.italic = italic
     run.font.underline = underline
     run.font.color.rgb = color
+    _set_char_spacing(run)
 
 
 def _set_paragraph_base(p, *, bullet: bool = False, indent_level: int = 0):
@@ -77,7 +89,13 @@ def _is_dtp(line: str) -> bool:
 
 
 def _is_bullet(line: str) -> bool:
-    return line.strip().startswith(BULLET_PREFIXES) or bool(re.match(r"^\s*\d+[.)]\s+", line))
+    s = line.strip()
+    if s.startswith(BULLET_PREFIXES):
+        return True
+    # Markdown-style "* item" bullet (a single asterisk + space), NOT "**bold**".
+    if re.match(r"^\*\s+\S", s):
+        return True
+    return bool(re.match(r"^\s*\d+[.)]\s+", line))
 
 
 def _is_heading(line: str) -> bool:
@@ -108,10 +126,10 @@ def _add_body(doc: Document, line: str, *, bullet: bool = False, indent_level: i
     _set_paragraph_base(p, bullet=bullet, indent_level=indent_level)
     if bullet:
         s = line.strip()
-        if s.startswith("·") or s.startswith("-") or s.startswith("–"):
-            s = "•" + s[1:]
-        if s.startswith("•") and not s.startswith("•\t"):
-            s = "•\t" + s[1:].lstrip()
+        # Normalise any bullet marker (*, •, ·, -, –) to a "•<tab>" prefix.
+        m = re.match(r"^(\*|•|·|-|–)\s+(.*)$", s)
+        if m:
+            s = "•\t" + m.group(2)
         _add_markdown_runs(p, s)
     else:
         _add_markdown_runs(p, line.strip())
@@ -163,10 +181,10 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
     section = doc.sections[0]
-    section.top_margin = Cm(1.6)
-    section.bottom_margin = Cm(1.6)
-    section.left_margin = Cm(1.2)
-    section.right_margin = Cm(1.2)
+    section.top_margin = Cm(2.54)
+    section.bottom_margin = Cm(2.54)
+    section.left_margin = Cm(2.54)
+    section.right_margin = Cm(2.54)
     style = doc.styles["Normal"]
     style.font.name = BODY_FONT
     style._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
