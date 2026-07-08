@@ -9,8 +9,8 @@ try:
 except Exception:  # pragma: no cover
     load_dotenv = None
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-ENV_PATH = ROOT_DIR / ".env"
+ROOT_DIR = Path(os.getenv("HANDWRITTEN_NOTES_ROOT", str(Path(__file__).resolve().parents[1]))).expanduser()
+ENV_PATH = Path(os.getenv("HANDWRITTEN_NOTES_ENV", str(ROOT_DIR / ".env"))).expanduser()
 if load_dotenv:
     load_dotenv(ENV_PATH)
 

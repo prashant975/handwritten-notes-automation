@@ -18,7 +18,7 @@ from src.usage_tracker import append_usage_row, build_usage_row
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(os.getenv("HANDWRITTEN_NOTES_ROOT", str(Path(__file__).parent))).expanduser()
 LOGO_PATH = BASE_DIR / "assets" / "pw_logo.png"
 ALLOWED_EMAILS_PATH = BASE_DIR / "assets" / "allowed_emails.txt"
 DEFAULT_ALLOWED_EMAILS_WORKBOOK = Path.home() / "Downloads" / "App Allowed Emails.xlsx"
