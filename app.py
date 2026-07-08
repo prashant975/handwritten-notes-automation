@@ -5,6 +5,7 @@ import tempfile
 import os
 import base64
 import html
+import time
 from pathlib import Path
 
 import requests
@@ -24,6 +25,7 @@ DEFAULT_ALLOWED_EMAILS_WORKBOOK = Path.home() / "Downloads" / "App Allowed Email
 DEFAULT_ALLOWED_EMAILS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ZpHOOYUVL_uz6MZ_yitrdUuSscLUNygCvRsh9-xhwa0/edit?usp=sharing"
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 GOOGLE_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
+SESSION_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
 
 
 def _configured_secret(name: str) -> str:
@@ -181,6 +183,16 @@ def _logout_user() -> None:
     if bool(getattr(st.user, "is_logged_in", False)):
         st.logout()
     st.rerun()
+
+
+def _auth_session_expired() -> bool:
+    """Expire signed-in users 7 days after the identity token was issued."""
+    try:
+        issued_at = int(st.user.get("iat", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+    return issued_at > 0 and time.time() - issued_at >= SESSION_TIMEOUT_SECONDS
 
 
 def _active_theme() -> str:
@@ -498,6 +510,10 @@ def _require_allowed_google_user() -> None:
     is_logged_in = bool(getattr(st.user, "is_logged_in", False))
     if not is_logged_in:
         _render_login_page()
+        st.stop()
+
+    if _auth_session_expired():
+        _logout_user()
         st.stop()
 
     allowed_emails = _load_allowed_emails()
