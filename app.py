@@ -163,6 +163,17 @@ def _usd_to_inr_rate() -> float:
         return 83.0
 
 
+def _google_access_token() -> str:
+    try:
+        tokens = st.user.get("tokens", {})
+    except Exception:
+        tokens = {}
+    try:
+        return str(tokens.get("access", "")).strip()
+    except Exception:
+        return str(getattr(tokens, "access", "") or "").strip()
+
+
 def _track_usage_for_result(filename: str, result) -> str:
     metadata = result.metadata or {}
     row = build_usage_row(
@@ -176,7 +187,12 @@ def _track_usage_for_result(filename: str, result) -> str:
         image_model=IMAGE_MODEL,
         usd_to_inr=_usd_to_inr_rate(),
     )
-    return append_usage_row(row, secrets=st.secrets, local_path=OUTPUTS_DIR / "usage_tracking.csv")
+    return append_usage_row(
+        row,
+        secrets=st.secrets,
+        local_path=OUTPUTS_DIR / "usage_tracking.csv",
+        user_access_token=_google_access_token(),
+    )
 
 
 def _logout_user() -> None:

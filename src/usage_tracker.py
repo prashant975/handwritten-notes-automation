@@ -253,6 +253,48 @@ def _append_via_service_account(row: list[Any], secrets: Any) -> str | None:
     return f"google_sheets_api:{len(sheet_urls)}"
 
 
+def _append_via_user_access_token(row: list[Any], secrets: Any, access_token: str) -> str | None:
+    access_token = str(access_token or "").strip()
+    if not access_token:
+        return None
+
+    sheet_urls = _usage_tracking_sheet_urls(secrets)
+    if not sheet_urls:
+        return None
+
+    base_sheet_range = (
+        os.getenv("USAGE_TRACKING_RANGE", "").strip()
+        or _secret_value(secrets, "usage_tracking_range")
+        or "A:J"
+    )
+    sheet_name = _usage_tracking_sheet_name(secrets)
+    for index, sheet_url in enumerate(sheet_urls):
+        spreadsheet_id = _spreadsheet_id(sheet_url)
+        gid = _usage_tracking_gid_for(secrets, sheet_url, index)
+        sheet_range = base_sheet_range
+        if "!" not in sheet_range:
+            if sheet_name:
+                sheet_range = f"{_quote_sheet_title(sheet_name)}!{sheet_range}"
+            elif gid:
+                sheet_title = _sheet_title_for_gid(spreadsheet_id, gid, access_token)
+                if sheet_title:
+                    sheet_range = f"{_quote_sheet_title(sheet_title)}!{sheet_range}"
+
+        encoded_range = quote(sheet_range, safe="")
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+            f"{encoded_range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+        )
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={"values": [row]},
+            timeout=15,
+        )
+        response.raise_for_status()
+    return f"google_sheets_user_token:{len(sheet_urls)}"
+
+
 def _append_local(row: list[Any], path: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists() or path.stat().st_size == 0
@@ -334,8 +376,15 @@ def build_usage_row(
     ]
 
 
-def append_usage_row(row: list[Any], *, secrets: Any, local_path: Path) -> str:
+def append_usage_row(row: list[Any], *, secrets: Any, local_path: Path, user_access_token: str = "") -> str:
     errors: list[str] = []
+    try:
+        method = _append_via_user_access_token(row, secrets, user_access_token)
+        if method:
+            return method
+    except Exception as exc:
+        errors.append(f"Google user token failed: {exc}")
+
     try:
         method = _append_via_webhook(row, secrets)
         if method:

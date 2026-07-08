@@ -134,6 +134,19 @@ development, configure the OAuth redirect URI in Google Cloud as:
 http://localhost:8501/oauth2callback
 ```
 
+To let the app write usage rows directly to Google Sheets as the signed-in user,
+the auth block must expose the Google access token and request the Sheets scope:
+
+```toml
+[auth]
+expose_tokens = ["access"]
+
+[auth.google]
+client_kwargs = { scope = "openid email profile https://www.googleapis.com/auth/spreadsheets" }
+```
+
+Each signed-in user must have Editor access to the usage sheets.
+
 ### Usage tracking
 
 After a file is generated, the app records one usage row with:
