@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -39,6 +40,8 @@ MODEL_PRICING_USD_PER_1M = {
 IMAGE_PRICE_USD = {
     "gemini-2.5-flash-image": 0.039,
 }
+
+USAGE_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 def _secret_value(secrets: Any, name: str) -> str:
@@ -363,7 +366,7 @@ def build_usage_row(
         usd_to_inr=usd_to_inr,
     )
     return [
-        datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        datetime.now(timezone.utc).astimezone(USAGE_TIMEZONE).strftime("%d/%m/%Y, %H:%M:%S"),
         app_name,
         email,
         filename,
