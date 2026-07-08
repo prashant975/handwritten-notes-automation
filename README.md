@@ -167,6 +167,16 @@ usage_tracking_gid = "YOUR_TAB_GID"
 usage_tracking_range = "A:J"
 ```
 
+To append each usage row to more than one sheet, list the targets in order:
+
+```toml
+usage_tracking_google_sheet_urls = [
+  "https://docs.google.com/spreadsheets/d/FIRST_SHEET_ID/edit?gid=FIRST_TAB_GID#gid=FIRST_TAB_GID",
+  "https://docs.google.com/spreadsheets/d/SECOND_SHEET_ID/edit?gid=SECOND_TAB_GID#gid=SECOND_TAB_GID",
+]
+usage_tracking_gids = ["FIRST_TAB_GID", "SECOND_TAB_GID"]
+```
+
 ```powershell
 python -m streamlit run app.py
 ```

@@ -48,6 +48,20 @@ def _secret_value(secrets: Any, name: str) -> str:
         return ""
 
 
+def _secret_list(secrets: Any, name: str) -> list[str]:
+    try:
+        raw = secrets.get(name, "")
+    except Exception:
+        raw = ""
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return _split_config_list(str(raw))
+
+
+def _split_config_list(raw: str) -> list[str]:
+    return [item.strip() for item in raw.replace("\n", ",").replace(";", ",").split(",") if item.strip()]
+
+
 def _spreadsheet_id(sheet_url_or_id: str) -> str:
     text = sheet_url_or_id.strip()
     if "/spreadsheets/d/" in text:
@@ -66,20 +80,45 @@ def _sheet_gid(sheet_url_or_id: str) -> str:
 
 
 def _usage_tracking_sheet_url(secrets: Any) -> str:
-    return (
+    urls = _usage_tracking_sheet_urls(secrets)
+    return urls[0] if urls else ""
+
+
+def _usage_tracking_sheet_urls(secrets: Any) -> list[str]:
+    urls = (
+        _split_config_list(os.getenv("USAGE_TRACKING_GOOGLE_SHEET_URLS", ""))
+        or _secret_list(secrets, "usage_tracking_google_sheet_urls")
+    )
+    if urls:
+        return urls
+    single = (
         os.getenv("USAGE_TRACKING_GOOGLE_SHEET_URL", "").strip()
         or _secret_value(secrets, "usage_tracking_google_sheet_url")
         or os.getenv("ALLOWED_EMAILS_GOOGLE_SHEET_URL", "").strip()
         or _secret_value(secrets, "allowed_emails_google_sheet_url")
     )
+    return [single] if single else []
 
 
 def _usage_tracking_gid(secrets: Any, sheet_url: str) -> str:
+    gids = _usage_tracking_gids(secrets)
+    return gids[0] if gids else _sheet_gid(sheet_url)
+
+
+def _usage_tracking_gids(secrets: Any) -> list[str]:
     return (
-        os.getenv("USAGE_TRACKING_GID", "").strip()
-        or _secret_value(secrets, "usage_tracking_gid")
-        or _sheet_gid(sheet_url)
+        _split_config_list(os.getenv("USAGE_TRACKING_GIDS", ""))
+        or _secret_list(secrets, "usage_tracking_gids")
+        or _split_config_list(os.getenv("USAGE_TRACKING_GID", ""))
+        or _split_config_list(_secret_value(secrets, "usage_tracking_gid"))
     )
+
+
+def _usage_tracking_gid_for(secrets: Any, sheet_url: str, index: int) -> str:
+    gids = _usage_tracking_gids(secrets)
+    if index < len(gids):
+        return gids[index]
+    return _sheet_gid(sheet_url)
 
 
 def _usage_tracking_sheet_name(secrets: Any) -> str:
@@ -110,36 +149,40 @@ def _append_via_webhook(row: list[Any], secrets: Any) -> str | None:
     webhook_url = os.getenv("USAGE_TRACKING_WEBHOOK_URL", "").strip() or _secret_value(secrets, "usage_tracking_webhook_url")
     if not webhook_url:
         return None
-    sheet_url = _usage_tracking_sheet_url(secrets)
-    payload = {
-        "eventId": hashlib.sha256(json.dumps(row, default=str).encode("utf-8")).hexdigest(),
-        "spreadsheetId": _spreadsheet_id(sheet_url) if sheet_url else "",
-        "headers": USAGE_HEADERS,
-        "values": [row],
-        "sheetId": _usage_tracking_gid(secrets, sheet_url),
-        "sheetName": _usage_tracking_sheet_name(secrets),
-    }
-    last_error: Exception | None = None
-    for _ in range(WEBHOOK_ATTEMPTS):
+    sheet_urls = _usage_tracking_sheet_urls(secrets)
+    if not sheet_urls:
+        return None
+    base_event_id = hashlib.sha256(json.dumps(row, default=str).encode("utf-8")).hexdigest()
+    for index, sheet_url in enumerate(sheet_urls):
+        payload = {
+            "eventId": f"{base_event_id}:{index}",
+            "spreadsheetId": _spreadsheet_id(sheet_url),
+            "headers": USAGE_HEADERS,
+            "values": [row],
+            "sheetId": _usage_tracking_gid_for(secrets, sheet_url, index),
+            "sheetName": _usage_tracking_sheet_name(secrets),
+        }
+        last_error: Exception | None = None
+        for _ in range(WEBHOOK_ATTEMPTS):
+            try:
+                response = requests.post(webhook_url, json=payload, timeout=WEBHOOK_TIMEOUT_SECONDS)
+                break
+            except requests.Timeout as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"Webhook timed out for destination {index + 1} after {WEBHOOK_ATTEMPTS} attempt(s) "
+                f"with {WEBHOOK_TIMEOUT_SECONDS}s timeout."
+            ) from last_error
+        response.raise_for_status()
         try:
-            response = requests.post(webhook_url, json=payload, timeout=WEBHOOK_TIMEOUT_SECONDS)
-            break
-        except requests.Timeout as exc:
-            last_error = exc
-    else:
-        raise RuntimeError(
-            f"Webhook timed out after {WEBHOOK_ATTEMPTS} attempt(s) "
-            f"with {WEBHOOK_TIMEOUT_SECONDS}s timeout."
-        ) from last_error
-    response.raise_for_status()
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        snippet = response.text.strip().replace("\n", " ")[:160]
-        raise RuntimeError(f"Webhook did not return JSON. Response starts with: {snippet}") from exc
-    if not payload.get("ok"):
-        raise RuntimeError(f"Webhook rejected usage row: {payload.get('error') or payload}")
-    return "google_sheet_webhook"
+            payload = response.json()
+        except ValueError as exc:
+            snippet = response.text.strip().replace("\n", " ")[:160]
+            raise RuntimeError(f"Webhook did not return JSON. Response starts with: {snippet}") from exc
+        if not payload.get("ok"):
+            raise RuntimeError(f"Webhook rejected usage row for destination {index + 1}: {payload.get('error') or payload}")
+    return f"google_sheet_webhook:{len(sheet_urls)}"
 
 
 def _quote_sheet_title(title: str) -> str:
@@ -160,8 +203,8 @@ def _sheet_title_for_gid(spreadsheet_id: str, gid: str, token: str) -> str:
 
 
 def _append_via_service_account(row: list[Any], secrets: Any) -> str | None:
-    sheet_url = _usage_tracking_sheet_url(secrets)
-    if not sheet_url:
+    sheet_urls = _usage_tracking_sheet_urls(secrets)
+    if not sheet_urls:
         return None
 
     info = _service_account_info(secrets)
@@ -177,35 +220,37 @@ def _append_via_service_account(row: list[Any], secrets: Any) -> str | None:
     )
     credentials.refresh(Request())
 
-    spreadsheet_id = _spreadsheet_id(sheet_url)
-    gid = _usage_tracking_gid(secrets, sheet_url)
-    sheet_range = (
+    base_sheet_range = (
         os.getenv("USAGE_TRACKING_RANGE", "").strip()
         or _secret_value(secrets, "usage_tracking_range")
         or "A:J"
     )
     sheet_name = _usage_tracking_sheet_name(secrets)
-    if "!" not in sheet_range:
-        if sheet_name:
-            sheet_range = f"{_quote_sheet_title(sheet_name)}!{sheet_range}"
-        elif gid:
-            sheet_title = _sheet_title_for_gid(spreadsheet_id, gid, credentials.token)
-            if sheet_title:
-                sheet_range = f"{_quote_sheet_title(sheet_title)}!{sheet_range}"
+    for index, sheet_url in enumerate(sheet_urls):
+        spreadsheet_id = _spreadsheet_id(sheet_url)
+        gid = _usage_tracking_gid_for(secrets, sheet_url, index)
+        sheet_range = base_sheet_range
+        if "!" not in sheet_range:
+            if sheet_name:
+                sheet_range = f"{_quote_sheet_title(sheet_name)}!{sheet_range}"
+            elif gid:
+                sheet_title = _sheet_title_for_gid(spreadsheet_id, gid, credentials.token)
+                if sheet_title:
+                    sheet_range = f"{_quote_sheet_title(sheet_title)}!{sheet_range}"
 
-    encoded_range = quote(sheet_range, safe="")
-    url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
-        f"{encoded_range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
-    )
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {credentials.token}"},
-        json={"values": [row]},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return "google_sheets_api"
+        encoded_range = quote(sheet_range, safe="")
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/"
+            f"{encoded_range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+        )
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            json={"values": [row]},
+            timeout=15,
+        )
+        response.raise_for_status()
+    return f"google_sheets_api:{len(sheet_urls)}"
 
 
 def _append_local(row: list[Any], path: Path) -> str:
