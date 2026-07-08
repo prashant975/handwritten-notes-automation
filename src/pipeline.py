@@ -17,6 +17,14 @@ from .slide_filter import filter_slides
 from .utils import chunked, copy_input, ensure_dir, make_run_id, safe_name, write_json, zip_dir
 
 
+def _api_call_metadata(resp, **extra) -> dict:
+    metadata = {"provider": resp.provider, "model": resp.model}
+    metadata.update(extra)
+    if getattr(resp, "usage", None):
+        metadata.update(resp.usage)
+    return metadata
+
+
 def _load_slides_from_run(run_dir: Path) -> list[SlideData]:
     """Reconstruct SlideData objects from a run's slides_raw.json (for rebuilds)."""
     import json
@@ -142,6 +150,8 @@ def run_pipeline(
             batch_size = 6 if send_images_to_ai else 18
         partial_notes: list[str] = []
         api_metadata: list[dict] = []
+        total_slides = len(slides)
+        active_slide_count = len(active_slides)
         client = None
         if allow_mock and not api_key:
             notes_text = generate_mock_notes(subject, mode, language_code, len(active_slides))
@@ -174,7 +184,7 @@ def run_pipeline(
             for i in sorted(chunk_results):
                 resp = chunk_results[i]
                 partial_notes.append(resp.text)
-                api_metadata.append({"provider": resp.provider, "model": resp.model, "chunk": i})
+                api_metadata.append(_api_call_metadata(resp, chunk=i))
             if len(partial_notes) == 1:
                 notes_text = partial_notes[0]
             else:
@@ -182,7 +192,7 @@ def run_pipeline(
                 try:
                     resp = client.generate(merge_prompt, [], max_images=0)
                     notes_text = resp.text
-                    api_metadata.append({"provider": resp.provider, "model": resp.model, "chunk": "merge"})
+                    api_metadata.append(_api_call_metadata(resp, chunk="merge"))
                 except Exception as e:
                     warnings.append(f"Merge call failed; concatenating chunk outputs instead. Error: {e}")
                     notes_text = "\n\n".join(partial_notes)
@@ -213,9 +223,29 @@ def run_pipeline(
         if pdf_warning:
             warnings.append(pdf_warning)
         warnings.extend(quality_check(notes_text, slides, docx_path, pdf_path, send_images_to_ai=send_images_to_ai))
-        write_json(run_dir / "run_metadata.json", {"input_file": str(input_path), "copied_input": str(copied_input), "subject": subject, "language": language_code, "mode": mode, "model": model, "provider_requested": provider, "send_images_to_ai": send_images_to_ai, "strict_filter": strict_filter, "batch_size": batch_size, "max_images_per_call": max_images_per_call, "api_calls": api_metadata, "warnings": warnings, "docx_path": str(docx_path) if docx_path else None, "pdf_path": str(pdf_path) if pdf_path else None})
+        run_metadata = {
+            "input_file": str(input_path),
+            "copied_input": str(copied_input),
+            "subject": subject,
+            "language": language_code,
+            "mode": mode,
+            "model": model,
+            "provider_requested": provider,
+            "send_images_to_ai": send_images_to_ai,
+            "strict_filter": strict_filter,
+            "batch_size": batch_size,
+            "max_images_per_call": max_images_per_call,
+            "total_slides": total_slides,
+            "active_slide_count": active_slide_count,
+            "input_unit": "slide/page",
+            "api_calls": api_metadata,
+            "warnings": warnings,
+            "docx_path": str(docx_path) if docx_path else None,
+            "pdf_path": str(pdf_path) if pdf_path else None,
+        }
+        write_json(run_dir / "run_metadata.json", run_metadata)
         zip_path = zip_dir(run_dir, run_dir.with_suffix(".zip"))
-        return PipelineResult(run_dir=run_dir, docx_path=docx_path, pdf_path=pdf_path, zip_path=zip_path, raw_notes_path=raw_notes_path, warnings=warnings, metadata={"api_calls": api_metadata})
+        return PipelineResult(run_dir=run_dir, docx_path=docx_path, pdf_path=pdf_path, zip_path=zip_path, raw_notes_path=raw_notes_path, warnings=warnings, metadata=run_metadata)
     except Exception as e:
         warnings.append(str(e))
         try:

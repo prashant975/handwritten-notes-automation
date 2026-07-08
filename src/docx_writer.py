@@ -20,6 +20,7 @@ HEADING_SIZE = Pt(18)
 DARK_GREY = RGBColor(0x00, 0x00, 0x99)   # body text (#000099)
 BOLD_COLOR = RGBColor(0xE9, 0x71, 0x32)  # bold words (#E97132)
 BULLET_PREFIXES = ("•", "·", "-", "–")
+BULLET_MARKERS = ("•", "◦", "▪", "–")
 CHAR_SPACING_TWIPS = 30  # Expanded character spacing = 1.5 pt (1 pt = 20 twips)
 
 
@@ -30,6 +31,12 @@ def _set_char_spacing(run, twips: int = CHAR_SPACING_TWIPS):
         sp = OxmlElement("w:spacing")
         rpr.append(sp)
     sp.set(qn("w:val"), str(twips))
+
+
+def _set_no_same_style_spacing(p):
+    ppr = p._element.get_or_add_pPr()
+    if ppr.find(qn("w:contextualSpacing")) is None:
+        ppr.append(OxmlElement("w:contextualSpacing"))
 
 
 def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=False, color=DARK_GREY):
@@ -45,10 +52,15 @@ def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=Fa
 
 
 def _set_paragraph_base(p, *, bullet: bool = False, indent_level: int = 0):
+    try:
+        p.style = "Body Text"
+    except Exception:
+        pass
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.line_spacing = 1.0
+    p.paragraph_format.line_spacing = 1.2
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    _set_no_same_style_spacing(p)
     if bullet:
         # Each nesting level shifts the bullet right by ~0.7 cm while keeping the
         # hanging indent so wrapped lines align under the text, not the marker.
@@ -65,11 +77,12 @@ def _set_paragraph_base(p, *, bullet: bool = False, indent_level: int = 0):
 _MD_RE = re.compile(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*)")
 
 
-def _add_markdown_runs(p, text: str, *, size=BODY_SIZE, base_color=DARK_GREY):
+def _add_markdown_runs(p, text: str, *, size=BODY_SIZE, base_color=DARK_GREY, default_bold: bool = False, underline: bool = False, highlight=None):
     for part in _MD_RE.split(text):
         if part == "":
             continue
-        bold = italic = False
+        bold = default_bold
+        italic = False
         clean = part
         if part.startswith("***") and part.endswith("***") and len(part) >= 6:
             bold = italic = True
@@ -81,7 +94,9 @@ def _add_markdown_runs(p, text: str, *, size=BODY_SIZE, base_color=DARK_GREY):
             italic = True
             clean = part[1:-1]
         run = p.add_run(clean)
-        _set_run_font(run, size=size, bold=bold, italic=italic, color=BOLD_COLOR if bold else base_color)
+        _set_run_font(run, size=size, bold=bold, italic=italic, underline=underline, color=BOLD_COLOR if bold and not default_bold else base_color)
+        if highlight is not None:
+            run.font.highlight_color = highlight
 
 
 def _is_dtp(line: str) -> bool:
@@ -114,13 +129,22 @@ def _is_heading(line: str) -> bool:
 def _add_heading(doc: Document, line: str):
     p = doc.add_paragraph()
     _set_paragraph_base(p)
-    # Controlled spacing above/below the heading instead of a blank paragraph.
-    p.paragraph_format.space_before = Pt(10)
-    p.paragraph_format.space_after = Pt(4)
     clean = line.strip().strip("#").strip()
-    run = p.add_run(clean)
-    _set_run_font(run, size=HEADING_SIZE, bold=True, underline=True, color=RGBColor(0, 0, 0))
-    run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+    _add_markdown_runs(
+        p,
+        clean,
+        size=HEADING_SIZE,
+        base_color=RGBColor(0, 0, 0),
+        default_bold=True,
+        underline=True,
+        highlight=WD_COLOR_INDEX.BRIGHT_GREEN,
+    )
+    return p
+
+
+def _add_blank_line(doc: Document):
+    p = doc.add_paragraph()
+    _set_paragraph_base(p)
     return p
 
 
@@ -129,10 +153,11 @@ def _add_body(doc: Document, line: str, *, bullet: bool = False, indent_level: i
     _set_paragraph_base(p, bullet=bullet, indent_level=indent_level)
     if bullet:
         s = line.strip()
-        # Normalise any bullet marker (*, •, ·, -, –) to a "•<tab>" prefix.
+        # Normalise bullet markers and make nested bullets visibly different.
         m = re.match(r"^(\*|•|·|-|–)\s+(.*)$", s)
         if m:
-            s = "•\t" + m.group(2)
+            marker = BULLET_MARKERS[min(max(0, indent_level), len(BULLET_MARKERS) - 1)]
+            s = f"{marker}\t{m.group(2)}"
         _add_markdown_runs(p, s)
     else:
         _add_markdown_runs(p, line.strip())
@@ -214,6 +239,7 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
     add_title_block(doc, subject, chapter_title)
 
     inserted_images = 0
+    content_added = False
     for raw_line in notes_text.splitlines():
         line = raw_line.rstrip()
         if not line.strip():
@@ -230,15 +256,21 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
                         warnings.append(f"Could not insert image for slide {note.slide_no}.")
                 else:
                     warnings.append(f"DTP note found but slide image could not be matched: {line[:140]}")
+            content_added = True
             continue
         if _is_heading(line):
+            if content_added:
+                _add_blank_line(doc)
             _add_heading(doc, line)
+            content_added = True
         elif _is_bullet(line):
             leading = len(raw_line) - len(raw_line.lstrip(" \t"))
             indent_level = min(3, leading // 4) if leading else 0
             _add_body(doc, line, bullet=True, indent_level=indent_level)
+            content_added = True
         else:
             _add_body(doc, line, bullet=False)
+            content_added = True
     doc.save(str(output_path))
     warnings.append(f"Inserted {inserted_images} image(s) from DTP notes.")
     if not is_kalam_installed():

@@ -27,6 +27,49 @@ class GeminiResponse:
     provider: str
     model: str
     raw: dict[str, Any] | None = None
+    usage: dict[str, int] | None = None
+
+
+def _usage_from_mapping(data: dict[str, Any] | None) -> dict[str, int]:
+    if not data:
+        return {}
+    usage = data.get("usageMetadata") or data.get("usage_metadata") or {}
+    if not isinstance(usage, dict):
+        return {}
+    key_map = {
+        "promptTokenCount": "tokens_input",
+        "candidatesTokenCount": "tokens_output",
+        "totalTokenCount": "tokens_total",
+        "thoughtsTokenCount": "tokens_thinking",
+        "prompt_token_count": "tokens_input",
+        "candidates_token_count": "tokens_output",
+        "total_token_count": "tokens_total",
+        "thoughts_token_count": "tokens_thinking",
+    }
+    out: dict[str, int] = {}
+    for src, dest in key_map.items():
+        value = usage.get(src)
+        if isinstance(value, int):
+            out[dest] = value
+    return out
+
+
+def _usage_from_object(obj: Any) -> dict[str, int]:
+    usage = getattr(obj, "usage_metadata", None) or getattr(obj, "usageMetadata", None)
+    if not usage:
+        return {}
+    out: dict[str, int] = {}
+    attr_map = {
+        "prompt_token_count": "tokens_input",
+        "candidates_token_count": "tokens_output",
+        "total_token_count": "tokens_total",
+        "thoughts_token_count": "tokens_thinking",
+    }
+    for attr, dest in attr_map.items():
+        value = getattr(usage, attr, None)
+        if isinstance(value, int):
+            out[dest] = value
+    return out
 
 
 def _diagnose_http_error(status_code: int | None, body: str) -> str:
@@ -124,7 +167,7 @@ class GeminiClient:
         text = getattr(response, "text", "") or ""
         if not text.strip():
             raise GeminiError("SDK returned empty text.", provider="google_genai_sdk")
-        return GeminiResponse(text=text.strip(), provider="google_genai_sdk", model=self.model, raw={})
+        return GeminiResponse(text=text.strip(), provider="google_genai_sdk", model=self.model, raw={}, usage=_usage_from_object(response))
 
     def _post_generate_content(self, url: str, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int, provider: str) -> GeminiResponse:
         body = {
@@ -155,7 +198,7 @@ class GeminiClient:
         text = _extract_text_from_response(data)
         if not text:
             raise GeminiError(f"Gemini returned no text. Raw response: {json.dumps(data)[:1000]}", provider=provider, details=data)
-        return GeminiResponse(text=text, provider=provider, model=self.model, raw=data)
+        return GeminiResponse(text=text, provider=provider, model=self.model, raw=data, usage=_usage_from_mapping(data))
 
     def _generate_developer_rest(self, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int) -> GeminiResponse:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"

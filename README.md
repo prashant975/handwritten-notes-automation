@@ -77,6 +77,96 @@ If this fails, notes generation will fail too. Create a fresh key in AI Studio, 
 
 ## 4. Run app
 
+### Google login allowlist
+
+The Streamlit app now requires an allowlisted email. The primary allowlist is
+this Google Sheet:
+
+```text
+https://docs.google.com/spreadsheets/d/1ZpHOOYUVL_uz6MZ_yitrdUuSscLUNygCvRsh9-xhwa0/edit?usp=sharing
+```
+
+The app reads the sheet through Google Sheets CSV export and scans it for email
+addresses, so adding a user to the sheet is enough to allow that account. The
+sheet must be shared so the app can view it, for example "Anyone with the link
+can view".
+
+You can override the sheet URL with an environment variable:
+
+```powershell
+$env:ALLOWED_EMAILS_GOOGLE_SHEET_URL="https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+```
+
+Or with a top-level Streamlit secret:
+
+```toml
+allowed_emails_google_sheet_url = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+```
+
+If the Google Sheet is unavailable, the app falls back to the local workbook.
+For local workbook fallback, the app scans every sheet in the workbook.
+
+By default, the app looks for the workbook at:
+
+```text
+C:\Users\<your-user>\Downloads\App Allowed Emails.xlsx
+```
+
+You can override this with an environment variable:
+
+```powershell
+$env:ALLOWED_EMAILS_WORKBOOK="C:\path\to\App Allowed Emails.xlsx"
+```
+
+If the workbook is also unavailable, the app falls back to `assets/allowed_emails.txt`.
+
+Users sign in with Google and are then checked against the Google Sheet
+allowlist. Google login requires real OAuth credentials in
+`.streamlit/secrets.toml`; the placeholder `client_id` and `client_secret`
+values will not work.
+
+To enable real Google login, create `.streamlit/secrets.toml` from
+`.streamlit/secrets.toml.example`, then add your Google OAuth client ID and
+secret. These credentials are for the app, not for each user. For local
+development, configure the OAuth redirect URI in Google Cloud as:
+
+```text
+http://localhost:8501/oauth2callback
+```
+
+### Usage tracking
+
+After a file is generated, the app records one usage row with:
+
+```text
+Timestamp, App Name, Email, Filename, Input Unit, Count, Tokens Input, Tokens Output, Model, Cost (INR)
+```
+
+By default, rows are written to `outputs/usage_tracking.csv`. To append directly
+to Google Sheets, configure one of these write methods:
+
+1. Apps Script webhook:
+   - Open the tracking Google Sheet.
+   - Go to Extensions -> Apps Script.
+   - Use `scripts/google_sheets_usage_webhook.gs`.
+   - Deploy as a Web app and set access to allow the app to post.
+   - Add the deployment URL to `.streamlit/secrets.toml`:
+
+```toml
+usage_tracking_webhook_url = "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
+```
+
+2. Google service account:
+   - Share the tracking sheet with the service account `client_email` as Editor.
+   - Add the JSON to `.streamlit/secrets.toml`:
+
+```toml
+google_service_account_json = '{"type":"service_account","project_id":"..."}'
+usage_tracking_google_sheet_url = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit?gid=YOUR_TAB_GID#gid=YOUR_TAB_GID"
+usage_tracking_gid = "YOUR_TAB_GID"
+usage_tracking_range = "A:J"
+```
+
 ```powershell
 python -m streamlit run app.py
 ```
