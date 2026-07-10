@@ -1,11 +1,14 @@
-from pathlib import Path
-import getpass
-from src.config import extract_api_key
+"""No provider key is needed any more.
 
-print("Paste your Gemini curl/URL/raw key below. Input will be hidden if terminal supports it.")
-value = getpass.getpass("Gemini key/curl: ")
-key = extract_api_key(value)
-if not key:
-    raise SystemExit("No key detected.")
-Path(".env").write_text(f"GEMINI_API_KEY={key}\nGEMINI_MODEL=gemini-2.5-pro\nGEMINI_PROVIDER=auto\n", encoding="utf-8")
-print("Created .env without printing the key.")
+This app now calls Gemini through the shared PW proxy (see pw_access.py), which
+holds the Gemini key on its side. There is nothing to paste here — sign in with
+your @pw.live Google account in the app instead.
+
+Kept as a stub so older shortcuts that call it don't break.
+"""
+
+print(
+    "No Gemini key needed. This app uses the PW proxy — the Gemini key lives on\n"
+    "the proxy, not in this app. Just sign in with your @pw.live Google account.\n"
+    "See pw-app-kit/CONNECT-TO-PW-PROXY.md for details."
+)

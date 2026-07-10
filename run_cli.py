@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-from src.config import DEFAULT_MODEL, DEFAULT_PROVIDER, GEMINI_API_KEY, SUPPORTED_EXTENSIONS, extract_api_key
+from src.config import DEFAULT_MODEL, SUPPORTED_EXTENSIONS
 from src.pipeline import run_batch, run_pipeline
 
 
@@ -21,9 +22,8 @@ def main():
     parser.add_argument("--subject", required=True, choices=["biology", "physics", "chemistry"])
     parser.add_argument("--language", default="English", choices=["English", "Hindi", "en", "hi"])
     parser.add_argument("--mode", default="summary", choices=["summary", "complete"])
-    parser.add_argument("--api-key", default=GEMINI_API_KEY, help="Gemini API key or full curl/URL containing ?key=")
+    parser.add_argument("--google-token", default=os.getenv("PW_GOOGLE_TOKEN", ""), help="Signed-in @pw.live Google access/id token (or set PW_GOOGLE_TOKEN). Required unless --allow-mock is used; the PW proxy holds the Gemini key.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--provider", default=DEFAULT_PROVIDER, choices=["auto", "google_genai_sdk", "developer_rest", "aiplatform_rest"])
     parser.add_argument("--no-images", action="store_true", help="Do not send rendered slide images to AI")
     parser.add_argument("--no-strict-filter", action="store_true")
     parser.add_argument("--allow-mock", action="store_true")
@@ -32,7 +32,9 @@ def main():
     parser.add_argument("--dtp-note-policy", default="hide_note_insert_image", choices=["hide_note_insert_image", "keep_note_and_insert_image", "keep_note_only"], help="hide_note_insert_image removes the yellow DTP note and inserts only the image")
     args = parser.parse_args()
     inputs = _collect_inputs(Path(args.input))
-    common = dict(subject=args.subject, language=args.language, mode=args.mode, api_key=extract_api_key(args.api_key), model=args.model, provider=args.provider, send_images_to_ai=not args.no_images, strict_filter=not args.no_strict_filter, allow_mock=args.allow_mock, ai_redraw_diagrams=args.ai_redraw_diagrams, image_model=args.image_model, dtp_note_policy=args.dtp_note_policy)
+    if not args.google_token and not args.allow_mock:
+        raise SystemExit("No Google token. Pass --google-token (a signed-in @pw.live token) or set PW_GOOGLE_TOKEN. The PW proxy needs it to run Gemini. Use --allow-mock for a no-AI dry run.")
+    common = dict(subject=args.subject, language=args.language, mode=args.mode, google_token=args.google_token.strip(), model=args.model, send_images_to_ai=not args.no_images, strict_filter=not args.no_strict_filter, allow_mock=args.allow_mock, ai_redraw_diagrams=args.ai_redraw_diagrams, image_model=args.image_model, dtp_note_policy=args.dtp_note_policy)
 
     if len(inputs) == 1:
         result = run_pipeline(inputs[0], **common)

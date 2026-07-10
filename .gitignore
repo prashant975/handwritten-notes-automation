@@ -4,6 +4,9 @@
 __pycache__/
 *.pyc
 build/
+dist/
+*.zip
+*.log
 runs/*
 !runs/.gitkeep
 outputs/*

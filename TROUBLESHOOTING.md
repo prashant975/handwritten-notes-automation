@@ -1,36 +1,37 @@
 # Troubleshooting Guide
 
-## Gemini key format
+## No API key — the app uses the PW proxy
 
-Correct `.env`:
+There is **no Gemini key** in this app. All Gemini calls go through the shared
+PW proxy (`pw_access.py`), which holds the key. Your `.env` only picks the model:
 
 ```env
-GEMINI_API_KEY=YOUR_KEY_ONLY
-GEMINI_MODEL=gemini-2.5-pro
-GEMINI_PROVIDER=auto
+MODEL_NAME=gemini-2.5-pro
+IMAGE_MODEL_NAME=gemini-2.5-flash-image
 ```
 
-The Streamlit UI can accept a full cURL/URL and extract the key automatically.
+Access is per-user: your `@pw.live` email must be in the **Handwritten Notes
+Automation** column of the shared Whitelisted sheet.
 
-## Test key
+## Test proxy access
 
 ```powershell
-python check_gemini.py
+python check_gemini.py --google-token "<signed-in @pw.live token>"
 ```
 
-Try providers one by one:
+You can also run the full onboarding self-check:
 
 ```powershell
-python check_gemini.py --provider google_genai_sdk
-python check_gemini.py --provider developer_rest
-python check_gemini.py --provider aiplatform_rest
+python verify_onboarding.py .env "<optional token>"
 ```
 
-## Common Gemini errors
+## Common errors
 
-- 400/404: wrong model or endpoint. Try `gemini-2.5-flash`.
-- 401/403: wrong/restricted/expired key. Create a new AI Studio key.
-- 429: quota limit. Reduce images per call or use Flash.
+- "not authorized for this app": your email isn't in the app's Whitelisted
+  column, or you signed in with a non-`@pw.live` account.
+- `gemini proxy error 401`: the Google token is missing/expired — sign in again.
+- Proxy unreachable: the app falls back to the local email allowlist for access,
+  but Gemini calls still need the proxy to be up.
 - Empty response: prompt too large. Reduce slides per call.
 
 ## Windows activation

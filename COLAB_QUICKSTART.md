@@ -8,15 +8,17 @@ Use this when you want to run the MVP in Google Colab.
 !pip install -q streamlit python-dotenv python-pptx PyMuPDF Pillow python-docx google-genai pydantic
 ```
 
-Upload or clone this project folder, then set your API key:
+Upload or clone this project folder. **No Gemini key is needed** — the app calls
+Gemini through the PW proxy, which holds the key. You pass a signed-in `@pw.live`
+Google token instead:
 
 ```python
 import os
-os.environ["GEMINI_API_KEY"] = "YOUR_KEY_HERE"
-os.environ["GEMINI_MODEL"] = "gemini-3.5-flash"
+os.environ["MODEL_NAME"] = "gemini-2.5-pro"
+os.environ["PW_GOOGLE_TOKEN"] = "YOUR_SIGNED_IN_PW_LIVE_TOKEN"
 ```
 
-Run from CLI inside Colab:
+Run from CLI inside Colab (`--google-token` reads `PW_GOOGLE_TOKEN` by default):
 
 ```python
 !python run_cli.py "/content/lecture.pdf" --subject biology --language English --mode summary

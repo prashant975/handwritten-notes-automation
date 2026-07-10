@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import pw_access
+
 from .ai_client import GeminiClient, GeminiError, generate_mock_notes
 from .config import LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
 from .docx_layout import derive_chapter_title
@@ -109,13 +111,12 @@ def run_pipeline(
     subject: str,
     language: str,
     mode: str,
-    api_key: str = "",
+    google_token: str = "",
     model: str = "gemini-2.5-pro",
-    provider: str = "auto",
     send_images_to_ai: bool = True,
     strict_filter: bool = True,
     batch_size: int | None = None,
-    max_images_per_call: int = 8,
+    max_images_per_call: int = 4,
     allow_mock: bool = False,
     image_insert_mode: str = "smart_crop",
     dtp_note_policy: str = "keep_note_and_insert_image",
@@ -147,18 +148,31 @@ def run_pipeline(
             raise RuntimeError("No slides/pages left after filtering. Disable strict filtering and try again.")
         language_code = LANGUAGE_CODES.get(language, language).lower()
         if batch_size is None or batch_size <= 0:
-            batch_size = 6 if send_images_to_ai else 18
+            # Keep image batches small: each page image is sent inline through the
+            # Vercel proxy, which caps request bodies at ~4.5 MB. Images are also
+            # compressed in ai_client, but a small batch keeps a safety margin.
+            batch_size = 4 if send_images_to_ai else 18
         partial_notes: list[str] = []
         api_metadata: list[dict] = []
         total_slides = len(slides)
         active_slide_count = len(active_slides)
         client = None
-        if allow_mock and not api_key:
+        # One UsageSession per file (=per task). Every Gemini call below is tagged
+        # with `session=` so the proxy accumulates their usage and writes ONE
+        # combined Gemini row per file to the `Usage Cost` tab on flush().
+        usage_session = pw_access.UsageSession(
+            google_token,
+            filename=input_path.name,
+            input_unit="No. of pages",
+            count=active_slide_count,
+        )
+        if allow_mock and not google_token:
             notes_text = generate_mock_notes(subject, mode, language_code, len(active_slides))
             partial_notes = [notes_text]
             api_metadata.append({"provider": "mock", "model": "mock"})
+            usage_session = None
         else:
-            client = GeminiClient(api_key=api_key, model=model, provider=provider)
+            client = GeminiClient(google_token, model=model, session=usage_session)
             chunks = list(chunked(active_slides, batch_size))
 
             def _run_chunk(i: int, slide_chunk):
@@ -213,6 +227,12 @@ def run_pipeline(
                 warnings.append(f"AI-redrew {n_redrawn} diagram image(s) in handwritten style.")
                 api_metadata.append({"provider": "image", "model": image_model, "redrawn": n_redrawn})
 
+        # All Gemini calls for this file are done — write the single combined
+        # Usage Cost row via the proxy (one Gemini row, tokens + cost summed).
+        usage_logged = False
+        if usage_session is not None:
+            usage_logged = usage_session.flush() is not None
+
         output_dir = ensure_dir(run_dir / "output")
         stem = safe_name(input_path.stem)
         docx_path = output_dir / f"{stem}_handwritten_notes.docx"
@@ -230,7 +250,8 @@ def run_pipeline(
             "language": language_code,
             "mode": mode,
             "model": model,
-            "provider_requested": provider,
+            "provider_requested": "pw_proxy",
+            "usage_logged": usage_logged,
             "send_images_to_ai": send_images_to_ai,
             "strict_filter": strict_filter,
             "batch_size": batch_size,

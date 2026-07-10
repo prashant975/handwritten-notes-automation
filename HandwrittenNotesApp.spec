@@ -3,13 +3,17 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [
     ('app.py', '.'),
+    ('pw_access.py', '.'),
     ('src', 'src'),
     ('assets', 'assets'),
     ('prompts', 'prompts'),
-    ('.streamlit/secrets.toml.example', '.streamlit'),
+    # Bundle the REAL login config INSIDE the exe so it runs as a single
+    # standalone file — no loose .streamlit/secrets.toml to ship alongside.
+    # The launcher chdir's into this bundle dir so Streamlit finds it.
+    ('.streamlit/secrets.toml', '.streamlit'),
 ]
 binaries = []
-hiddenimports = ['streamlit.web.cli', 'streamlit.runtime.scriptrunner.magic_funcs']
+hiddenimports = ['streamlit.web.cli', 'streamlit.runtime.scriptrunner.magic_funcs', 'pw_access']
 tmp_ret = collect_all('streamlit')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('altair')

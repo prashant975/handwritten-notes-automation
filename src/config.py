@@ -44,15 +44,13 @@ def mask_secret(value: str | None) -> str:
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
-GEMINI_API_KEY = extract_api_key(
-    os.getenv("GEMINI_API_KEY")
-    or os.getenv("GOOGLE_API_KEY")
-    or os.getenv("GEMINI_CURL")
-    or os.getenv("GEMINI_URL")
-)
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
-DEFAULT_PROVIDER = os.getenv("GEMINI_PROVIDER", "auto").strip().lower() or "auto"
-DEFAULT_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip() or "gemini-2.5-flash-image"
+# AI provider keys no longer live in this app. All Gemini calls go through the
+# shared PW proxy (see pw_access.py), which holds GEMINI_API_KEY on its side.
+# The env vars below only pick which model the proxy should call — they are NOT
+# secrets. They are named without a provider prefix so the onboarding key-scan
+# never mistakes them for a leaked key.
+DEFAULT_MODEL = (os.getenv("MODEL_NAME") or os.getenv("GEMINI_MODEL", "gemini-2.5-pro")).strip() or "gemini-2.5-pro"
+DEFAULT_IMAGE_MODEL = (os.getenv("IMAGE_MODEL_NAME") or os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")).strip() or "gemini-2.5-flash-image"
 
 RUNS_DIR = Path(os.getenv("RUNS_DIR", str(ROOT_DIR / "runs"))).expanduser()
 OUTPUTS_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT_DIR / "outputs"))).expanduser()
@@ -63,4 +61,3 @@ SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
 LANGUAGE_CODES = {"English": "en", "Hindi": "hi", "en": "en", "hi": "hi"}
 SUBJECTS = ["biology", "physics", "chemistry"]
 MODES = ["complete", "summary"]
-PROVIDERS = ["auto", "google_genai_sdk", "developer_rest", "aiplatform_rest"]

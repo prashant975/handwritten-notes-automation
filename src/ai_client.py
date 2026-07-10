@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import requests
+import pw_access
 
-from .config import extract_api_key
 from .utils import image_mime_type
 
 
@@ -54,35 +52,18 @@ def _usage_from_mapping(data: dict[str, Any] | None) -> dict[str, int]:
     return out
 
 
-def _usage_from_object(obj: Any) -> dict[str, int]:
-    usage = getattr(obj, "usage_metadata", None) or getattr(obj, "usageMetadata", None)
-    if not usage:
+def _usage_from_proxy(resp: dict[str, Any] | None) -> dict[str, int]:
+    """Fall back to the proxy's own usage summary ({"tokens_in", "tokens_out"})
+    when the raw Gemini response didn't carry usageMetadata."""
+    usage = (resp or {}).get("usage") or {}
+    if not isinstance(usage, dict):
         return {}
     out: dict[str, int] = {}
-    attr_map = {
-        "prompt_token_count": "tokens_input",
-        "candidates_token_count": "tokens_output",
-        "total_token_count": "tokens_total",
-        "thoughts_token_count": "tokens_thinking",
-    }
-    for attr, dest in attr_map.items():
-        value = getattr(usage, attr, None)
-        if isinstance(value, int):
-            out[dest] = value
+    if isinstance(usage.get("tokens_in"), int):
+        out["tokens_input"] = usage["tokens_in"]
+    if isinstance(usage.get("tokens_out"), int):
+        out["tokens_output"] = usage["tokens_out"]
     return out
-
-
-def _diagnose_http_error(status_code: int | None, body: str) -> str:
-    base = f"HTTP {status_code}: {body[:800]}" if status_code else body[:800]
-    if status_code in {400, 404}:
-        return base + "\nLikely cause: wrong model name, wrong endpoint, or unsupported API version. Try gemini-2.5-flash or provider=developer_rest."
-    if status_code in {401, 403}:
-        return base + "\nLikely cause: invalid/expired API key, Gemini API not enabled, key restricted incorrectly, or pasted full curl instead of only key. Create/rotate a new AI Studio key."
-    if status_code == 429:
-        return base + "\nLikely cause: quota/rate limit. Wait, reduce slide images, or use gemini-2.5-flash."
-    if status_code and status_code >= 500:
-        return base + "\nLikely cause: temporary Google service/server issue. Retry later or switch provider."
-    return base
 
 
 def _extract_text_from_response(data: dict[str, Any]) -> str:
@@ -104,175 +85,159 @@ def _extract_text_from_response(data: dict[str, Any]) -> str:
     return ""
 
 
+# The proxy is hosted on Vercel, whose serverless functions reject any request
+# body larger than ~4.5 MB. Pages are rendered as 2x PNGs (often 1-3 MB each),
+# so we downscale + re-encode them to JPEG before base64 to stay well under that
+# limit, and keep a hard byte budget as a final safety net.
+_PROXY_BODY_BUDGET = 4_000_000          # bytes; < Vercel's ~4.5 MB hard limit
+_IMAGE_MAX_DIM = 1600                    # longest edge sent to Gemini
+_IMAGE_JPEG_QUALITY = 80
+
+
+def _encode_image_inline(image_path: Path) -> dict[str, Any] | None:
+    """Return an inline_data part for one image, downscaled and JPEG-compressed
+    so the request stays small. Falls back to the raw bytes if PIL is missing or
+    the image can't be processed."""
+    p = Path(image_path)
+    if not p.exists():
+        return None
+    raw = p.read_bytes()
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as im:
+            im = im.convert("RGB")
+            im.thumbnail((_IMAGE_MAX_DIM, _IMAGE_MAX_DIM))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=_IMAGE_JPEG_QUALITY, optimize=True)
+            data = buf.getvalue()
+        return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(data).decode("ascii")}}
+    except Exception:
+        return {"inline_data": {"mime_type": image_mime_type(p), "data": base64.b64encode(raw).decode("ascii")}}
+
+
 def _build_rest_parts(prompt: str, image_paths: list[Path] | None = None, max_images: int = 8) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = [{"text": prompt}]
     for image_path in (image_paths or [])[:max_images]:
-        if not image_path or not Path(image_path).exists():
+        if not image_path:
             continue
-        data = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-        parts.append({"inline_data": {"mime_type": image_mime_type(Path(image_path)), "data": data}})
+        part = _encode_image_inline(Path(image_path))
+        if part:
+            parts.append(part)
     return parts
 
 
-class GeminiClient:
-    def __init__(self, api_key: str, model: str = "gemini-2.5-pro", provider: str = "auto", timeout: int = 240, max_retries: int = 3):
-        self.api_key = extract_api_key(api_key)
-        self.model = model.strip() or "gemini-2.5-pro"
-        self.provider = provider.strip().lower() or "auto"
-        self.timeout = timeout
-        self.max_retries = max(0, max_retries)
-        if not self.api_key:
-            raise GeminiError("Gemini API key is empty. Put only the key after ?key= into .env or paste it in the app.")
+def _fit_body_to_budget(body: dict[str, Any], budget: int = _PROXY_BODY_BUDGET) -> int:
+    """Safety net: if the serialized request still exceeds the proxy's size
+    budget, drop trailing inline images (never the prompt text at index 0) until
+    it fits. Returns how many images were dropped."""
+    try:
+        parts = body["contents"][0]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return 0
+    dropped = 0
+    while len(json.dumps(body).encode("utf-8")) > budget:
+        for i in range(len(parts) - 1, 0, -1):
+            if "inline_data" in parts[i]:
+                parts.pop(i)
+                dropped += 1
+                break
+        else:
+            break  # nothing left to drop but the prompt
+    return dropped
 
-    def providers_to_try(self) -> list[str]:
-        if self.provider == "auto":
-            return ["google_genai_sdk", "developer_rest", "aiplatform_rest"]
-        return [self.provider]
+
+class GeminiClient:
+    """Gemini access through the shared PW proxy.
+
+    The app ships no Gemini API key; the proxy holds it. Every call carries the
+    signed-in user's Google token, which the proxy verifies (against the app
+    whitelist) before calling Gemini with its own key and logging the usage.
+
+    When a `session` (pw_access.UsageSession) is passed, each call's usage is
+    accumulated into that session instead of logged per call, so a task that
+    makes many Gemini calls produces ONE combined Usage Cost row on flush().
+    """
+
+    def __init__(
+        self,
+        google_token: str,
+        model: str = "gemini-2.5-pro",
+        *,
+        session: "pw_access.UsageSession | None" = None,
+        timeout: int = 300,
+    ):
+        self.google_token = (google_token or "").strip()
+        self.model = model.strip() or "gemini-2.5-pro"
+        self.session = session
+        self.timeout = timeout
+        if not self.google_token:
+            raise GeminiError(
+                "No Google token available. Sign in with your @pw.live Google "
+                "account before generating notes (the PW proxy needs it)."
+            )
+
+    def _generate_content(self, model: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            resp = pw_access.gemini_generate(
+                self.google_token,
+                model=model,
+                request=body,
+                session=self.session,
+            )
+        except pw_access.PWAccessError as e:
+            raise GeminiError(str(e), provider="pw_proxy") from e
+        result = resp.get("result")
+        if not isinstance(result, dict):
+            raise GeminiError(
+                f"Proxy returned no Gemini result. Response: {json.dumps(resp)[:600]}",
+                provider="pw_proxy",
+                details=resp,
+            )
+        # Stash the proxy-level usage so callers can fall back to it.
+        result.setdefault("_pw_usage", resp.get("usage") or {})
+        return result
 
     def generate(self, prompt: str, image_paths: list[Path] | None = None, *, max_output_tokens: int = 12000, temperature: float = 0.15, max_images: int = 8) -> GeminiResponse:
-        errors: list[str] = []
-        for provider in self.providers_to_try():
-            try:
-                if provider == "google_genai_sdk":
-                    return self._generate_sdk(prompt, image_paths or [], max_output_tokens, temperature, max_images)
-                if provider == "developer_rest":
-                    return self._generate_developer_rest(prompt, image_paths or [], max_output_tokens, temperature, max_images)
-                if provider == "aiplatform_rest":
-                    return self._generate_aiplatform_rest(prompt, image_paths or [], max_output_tokens, temperature, max_images)
-                errors.append(f"Unknown provider: {provider}")
-            except Exception as e:
-                errors.append(f"[{provider}] {e}")
-        raise GeminiError("All Gemini providers failed:\n" + "\n\n".join(errors), provider=self.provider)
-
-    def _generate_sdk(self, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int) -> GeminiResponse:
-        try:
-            from google import genai
-            from google.genai import types
-        except Exception as e:
-            raise GeminiError("google-genai SDK is not installed. Run: pip install google-genai", provider="google_genai_sdk") from e
-        client = genai.Client(api_key=self.api_key)
-        parts = [types.Part.from_text(text=prompt)]
-        for image_path in image_paths[:max_images]:
-            if Path(image_path).exists():
-                parts.append(types.Part.from_bytes(data=Path(image_path).read_bytes(), mime_type=image_mime_type(Path(image_path))))
-        contents = [types.Content(role="user", parts=parts)]
-        config = types.GenerateContentConfig(temperature=temperature, max_output_tokens=max_output_tokens)
-        try:
-            response = client.models.generate_content(model=self.model, contents=contents, config=config)
-        except TypeError:
-            # Older google-genai builds used `generation_config=` instead of `config=`.
-            # Fall back to that (still passing the token limit) rather than dropping it,
-            # which would silently truncate long notes to the SDK default.
-            response = client.models.generate_content(model=self.model, contents=contents, generation_config=config)
-        text = getattr(response, "text", "") or ""
-        if not text.strip():
-            raise GeminiError("SDK returned empty text.", provider="google_genai_sdk")
-        return GeminiResponse(text=text.strip(), provider="google_genai_sdk", model=self.model, raw={}, usage=_usage_from_object(response))
-
-    def _post_generate_content(self, url: str, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int, provider: str) -> GeminiResponse:
         body = {
             "contents": [{"role": "user", "parts": _build_rest_parts(prompt, image_paths, max_images=max_images)}],
             "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens},
         }
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        resp = None
-        for attempt in range(self.max_retries + 1):
-            resp = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-            # Retry only on rate limiting (429) and transient server errors (5xx).
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < self.max_retries:
-                    retry_after = resp.headers.get("Retry-After")
-                    try:
-                        wait = float(retry_after) if retry_after else 2.0 * (2 ** attempt)
-                    except ValueError:
-                        wait = 2.0 * (2 ** attempt)
-                    time.sleep(min(wait, 30.0))
-                    continue
-            break
-        if resp.status_code >= 400:
-            raise GeminiError(_diagnose_http_error(resp.status_code, resp.text), provider=provider, status_code=resp.status_code, details=resp.text)
-        try:
-            data = resp.json()
-        except Exception as e:
-            raise GeminiError(f"Gemini returned non-JSON response: {resp.text[:800]}", provider=provider) from e
+        _fit_body_to_budget(body)
+        data = self._generate_content(self.model, body)
         text = _extract_text_from_response(data)
         if not text:
-            raise GeminiError(f"Gemini returned no text. Raw response: {json.dumps(data)[:1000]}", provider=provider, details=data)
-        return GeminiResponse(text=text, provider=provider, model=self.model, raw=data, usage=_usage_from_mapping(data))
-
-    def _generate_developer_rest(self, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int) -> GeminiResponse:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        return self._post_generate_content(url, prompt, image_paths, max_output_tokens, temperature, max_images, "developer_rest")
-
-    def _generate_aiplatform_rest(self, prompt: str, image_paths: list[Path], max_output_tokens: int, temperature: float, max_images: int) -> GeminiResponse:
-        url = f"https://aiplatform.googleapis.com/v1/publishers/google/models/{self.model}:generateContent?key={self.api_key}"
-        return self._post_generate_content(url, prompt, image_paths, max_output_tokens, temperature, max_images, "aiplatform_rest")
+            raise GeminiError(
+                f"Gemini (via proxy) returned no text. Raw response: {json.dumps(data)[:1000]}",
+                provider="pw_proxy",
+                details=data,
+            )
+        usage = _usage_from_mapping(data) or _usage_from_proxy({"usage": data.get("_pw_usage")})
+        return GeminiResponse(text=text, provider="pw_proxy", model=self.model, raw=data, usage=usage)
 
     def test_connection(self) -> GeminiResponse:
         return self.generate("Reply with exactly: OK", image_paths=[], max_output_tokens=32, temperature=0.0, max_images=0)
 
     def generate_image(self, prompt: str, image_path: Path, *, image_model: str = "gemini-2.5-flash-image") -> bytes:
-        """Image-to-image generation: send a prompt + source image, return PNG bytes.
-
-        Tries the google-genai SDK first, then the developer REST endpoint. Raises
-        GeminiError if no image could be produced.
-        """
-        errors: list[str] = []
-        try:
-            return self._generate_image_sdk(prompt, image_path, image_model)
-        except Exception as e:
-            errors.append(f"[sdk] {e}")
-        try:
-            return self._generate_image_rest(prompt, image_path, image_model)
-        except GeminiError:
-            raise
-        except Exception as e:
-            errors.append(f"[rest] {e}")
-        raise GeminiError("Image generation failed:\n" + "\n".join(errors), provider="image")
-
-    def _generate_image_sdk(self, prompt: str, image_path: Path, image_model: str) -> bytes:
-        try:
-            from google import genai
-            from google.genai import types
-        except Exception as e:
-            raise GeminiError("google-genai SDK is not installed.", provider="image_sdk") from e
-        client = genai.Client(api_key=self.api_key)
-        parts = [
-            types.Part.from_text(text=prompt),
-            types.Part.from_bytes(data=Path(image_path).read_bytes(), mime_type=image_mime_type(Path(image_path))),
-        ]
-        contents = [types.Content(role="user", parts=parts)]
-        try:
-            config = types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"])
-            response = client.models.generate_content(model=image_model, contents=contents, config=config)
-        except TypeError:
-            response = client.models.generate_content(model=image_model, contents=contents)
-        for cand in getattr(response, "candidates", None) or []:
-            content = getattr(cand, "content", None)
-            for part in (getattr(content, "parts", None) or []):
-                inline = getattr(part, "inline_data", None)
-                data = getattr(inline, "data", None) if inline else None
-                if data:
-                    return data if isinstance(data, bytes) else base64.b64decode(data)
-        raise GeminiError("SDK returned no image part.", provider="image_sdk")
-
-    def _generate_image_rest(self, prompt: str, image_path: Path, image_model: str) -> bytes:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{image_model}:generateContent?key={self.api_key}"
+        """Image-to-image generation through the proxy: send a prompt + source
+        image, return PNG bytes. Raises GeminiError if no image was produced."""
         body = {
             "contents": [{"role": "user", "parts": _build_rest_parts(prompt, [image_path], max_images=1)}],
             "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
         }
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        resp = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-        if resp.status_code >= 400:
-            raise GeminiError(_diagnose_http_error(resp.status_code, resp.text), provider="image_rest", status_code=resp.status_code)
-        data = resp.json()
+        _fit_body_to_budget(body)
+        data = self._generate_content(image_model, body)
         for cand in data.get("candidates") or []:
             for part in (cand.get("content") or {}).get("parts") or []:
                 inline = part.get("inline_data") or part.get("inlineData")
                 if inline and inline.get("data"):
                     return base64.b64decode(inline["data"])
-        raise GeminiError(f"REST returned no image. Raw: {json.dumps(data)[:600]}", provider="image_rest")
+        raise GeminiError(
+            f"Image generation via proxy returned no image. Raw: {json.dumps(data)[:600]}",
+            provider="pw_proxy",
+        )
 
 
 def generate_mock_notes(subject: str, mode: str, language: str, slide_count: int) -> str:
