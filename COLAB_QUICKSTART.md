@@ -5,7 +5,7 @@ Use this when you want to run the MVP in Google Colab.
 ```python
 !apt-get update -qq
 !apt-get install -y -qq libreoffice
-!pip install -q streamlit python-dotenv python-pptx PyMuPDF Pillow python-docx google-genai pydantic
+!pip install -q streamlit python-dotenv python-pptx PyMuPDF Pillow python-docx requests
 ```
 
 Upload or clone this project folder. **No Gemini key is needed** — the app calls

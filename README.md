@@ -143,9 +143,7 @@ A single file still works the same way (`--input lecture.pdf`).
 
 ## 5. What is improved from MVP
 
-- Gemini API test button before running a file.
-- Accepts raw key, full cURL, or URL containing `?key=`.
-- Tries three Gemini routes: `google-genai` SDK, Developer REST, and the `aiplatform.googleapis.com` REST style.
+- All Gemini calls go through the shared PW proxy (see `pw-app-kit/CONNECT-TO-PW-PROXY.md`); the app ships no Gemini key and no provider SDK.
 - No silent fake/mock notes unless you enable mock mode.
 - Handles long lectures in slide chunks and merges the result.
 - Removes question blocks while keeping NCERT/instructional text on the same slide.

@@ -22,6 +22,7 @@ pure frontend/SPA.
 | **pw_access.py** | Python backends | the client to copy in |
 | **pw_access.js** | Node backends + browsers/frontends | the client to copy in |
 | **verify_onboarding.py** | Python apps | one-command self-check |
+| **verify_onboarding.mjs** | JS / Node / frontend apps | one-command self-check |
 | **ONBOARD.md** | optional | a shorter TL;DR of this guide |
 
 ---
@@ -62,7 +63,7 @@ Copy the whole **`pw-app-kit`** folder into your app's project.
 ### Step 3 — Tell your AI assistant (copy-paste this prompt)
 Open your AI assistant (Anti-Gravity) **in your app's project** and paste:
 
-> **Onboard this app to the PW proxy following `pw-app-kit/CONNECT-TO-PW-PROXY.md`. My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE". Add the client (`pw_access.py` for a Python backend, or `pw_access.js` for a Node backend / frontend), set APP_NAME, add the access check before every run, route ALL AI calls (Gemini/Mathpix/Sarvam) through the proxy, and — if a task makes more than one AI call — use a `UsageSession` so each provider logs ONE combined row per task. Remove any local provider API keys from the code and .env, then run the verification and show me the result.**
+> **Onboard this app to the PW proxy following `pw-app-kit/CONNECT-TO-PW-PROXY.md`. My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE". Add the client (`pw_access.py` for a Python backend, or `pw_access.js` for a Node backend / frontend), set APP_NAME, add the access check before every run, route ALL AI calls (Gemini/Mathpix/Sarvam) through the proxy, and — if a task makes more than one AI call — use a `UsageSession` so each provider logs ONE combined row per task. Apply the login & session standards from the doc (7-day session, `@pw.live` only, deny on failure, don't auto-open the browser). Remove any local provider API keys from the code and .env, then run the verification and show me the result.**
 
 The AI does the wiring. It will **stop and ask you** only if your app name
 isn't on the sheet yet, or if it uses a provider the proxy doesn't have.
@@ -70,8 +71,8 @@ isn't on the sheet yet, or if it uses a provider the proxy doesn't have.
 ### Step 4 — Verify + test
 - **Python app:** from your backend folder, run
   `python pw-app-kit/verify_onboarding.py .env` → should print **ALL GOOD**.
-- **JS app:** confirm `/api/apps` lists your app and no API keys remain in your
-  code/`.env`/bundle.
+- **JS app:** from the folder where you put `pw_access.js`, run (Node 18+)
+  `node verify_onboarding.mjs .env` → should print **ALL GOOD**.
 - **Live test:** sign in as a whitelisted user, do something that uses AI, and
   check the sheet's **`Usage Cost`** tab for a new row.
 

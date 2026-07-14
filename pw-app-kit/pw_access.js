@@ -22,6 +22,11 @@ export const PROXY_BASE_URL = "https://pw-apps-proxy.vercel.app";
 const TIMEOUT_MS = 30_000;      // allowlist / logging
 const AI_TIMEOUT_MS = 300_000;  // gemini / mathpix / sarvam
 
+// Browser apps use proxy-first for Gemini (they can't safely hold a Vertex
+// token, and Vertex blocks browser CORS). Node/backends use token-vending.
+const IS_BROWSER = typeof window !== "undefined" && typeof document !== "undefined";
+const _vertexCache = { token: "", project: "", location: "global", expiry: 0 };
+
 export class PWAccessError extends Error {}
 
 function authHeaders(googleToken) {
@@ -85,19 +90,22 @@ export class UsageSession {
     this.app = app;
     this._byModel = new Map();
   }
-  add(model, tokensIn = 0, tokensOut = 0, costInr = 0) {
+  add(model, tokensIn = 0, tokensOut = 0, costInr = null) {
     const k = model || "";
-    const a = this._byModel.get(k) || { tokens_in: 0, tokens_out: 0, cost_inr: 0 };
+    const a = this._byModel.get(k)
+      || { tokens_in: 0, tokens_out: 0, cost_inr: 0, cost_known: false, requests: 0 };
     a.tokens_in += Number(tokensIn || 0);
     a.tokens_out += Number(tokensOut || 0);
-    a.cost_inr += Number(costInr || 0);
+    a.requests += 1;
+    if (costInr != null) { a.cost_inr += Number(costInr || 0); a.cost_known = true; }
     this._byModel.set(k, a);
   }
   async flush() {
-    const items = [...this._byModel.entries()].map(([model, v]) => ({
-      model, tokens_in: v.tokens_in, tokens_out: v.tokens_out,
-      cost_inr: Math.round(v.cost_inr * 1e4) / 1e4,
-    }));
+    const items = [...this._byModel.entries()].map(([model, v]) => {
+      const item = { model, tokens_in: v.tokens_in, tokens_out: v.tokens_out, requests: v.requests };
+      if (v.cost_known) item.cost_inr = Math.round(v.cost_inr * 1e4) / 1e4;
+      return item;
+    });
     this._byModel.clear();
     if (!items.length) return null;
     return logUsage(this.token,
@@ -105,17 +113,60 @@ export class UsageSession {
   }
 }
 
-/** Gemini through the proxy. Returns { ok, result, usage, cost_inr };
- *  `result` is the raw generateContent response. */
+async function getVertex(googleToken, app = APP_NAME) {
+  const now = Date.now();
+  if (_vertexCache.token && now < _vertexCache.expiry - 600000) return _vertexCache;
+  const r = await postJSON("/api/vertex/token", googleToken, { app }, TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`vertex token ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const d = await r.json();
+  _vertexCache.token = d.token || "";
+  _vertexCache.project = d.project || "";
+  _vertexCache.location = d.location || "global";
+  _vertexCache.expiry = now + (Number(d.expires_in) || 3300) * 1000;
+  return _vertexCache;
+}
+
+/** Gemini. Browser → proxy-first (`/api/gemini/generate`). Node/backend →
+ *  token-vending: calls Vertex directly (no 4.5 MB proxy body limit).
+ *  Returns { ok, result, model, usage, cost_inr }; `result` is the raw
+ *  generateContent response (same shape as the Gemini API). */
 export async function geminiGenerate(googleToken,
   { model, request, filename = "", input_unit = "", count = null, app = APP_NAME, session = null }) {
-  const body = { app, model, request, filename, input_unit, count };
-  if (session) body.log = false;
-  const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`gemini proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const data = await r.json();
-  if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-  return data;
+  if (IS_BROWSER) {
+    const body = { app, model, request, filename, input_unit, count };
+    if (session) body.log = false;
+    const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
+    if (r.status !== 200) throw new PWAccessError(`gemini proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    const data = await r.json();
+    if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+    return data;
+  }
+  // Node/backend: token-vending — call Vertex directly.
+  const v = await getVertex(googleToken, app);
+  const host = v.location === "global" ? "aiplatform.googleapis.com" : `${v.location}-aiplatform.googleapis.com`;
+  const url = `https://${host}/v1/projects/${v.project}/locations/${v.location}/publishers/google/models/${model}:generateContent`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
+  let data;
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${v.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) throw new PWAccessError(`vertex gemini ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    data = await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+  const um = data.usageMetadata || {};
+  const tin = um.promptTokenCount || 0;
+  const tout = (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
+  if (session) session.add(model, tin, tout, null);
+  else await logUsage(googleToken,
+    { filename, input_unit, count, items: [{ model, tokens_in: tin, tokens_out: tout, requests: 1 }], app });
+  return { ok: true, result: data, model, usage: { tokens_in: tin, tokens_out: tout }, cost_inr: null };
 }
 
 /** Mathpix OCR through the proxy. Returns { ok, result, cost_inr }. */

@@ -37,6 +37,12 @@ the client that fits; the steps are otherwise identical.
   never a provider key — so this is safe even in a public frontend bundle.
 - The proxy accepts a Google token from **any** Google sign-in, so a hosted app
   may use its **own** Google client ID. `@pw.live` is still required.
+- **Gemini routing is automatic — you don't configure it.** `gemini_generate`
+  picks the path itself: a **backend** (Python or Node) fetches a short-lived
+  Vertex token from the proxy and calls Vertex AI **directly** (no 4.5 MB proxy
+  body limit — needed for large PDFs/images); a **browser** calls the proxy's
+  `/api/gemini/generate` instead (Vertex blocks browser CORS, and a browser
+  shouldn't hold a Vertex token). Same `gemini_generate(...)` call either way.
 
 ---
 
@@ -110,6 +116,24 @@ That's all a human does. Everything below is for the AI.
 
 ---
 
+## Login & session standards (apply to the app's own sign-in)
+
+The proxy handles access + logging, but each app owns its Google sign-in. Apply
+these so login behaves the same across every PW app:
+
+- **Domain:** only `@pw.live` accounts (the proxy enforces this too).
+- **Session length: 7 days.** If the app mints its own session token/JWT, set
+  its expiry to 7 days (e.g. `timedelta(days=7)`).
+- **Fail closed:** if the allowlist check errors or the network is down → DENY.
+- **Check before every run:** call `check_allowed()` before each paid/main
+  action, not just at login (a user can be removed from the sheet mid-session).
+- **Don't auto-open the browser:** start Google sign-in only on a user click,
+  never on app startup.
+- **Store only session/user tokens** locally (browser storage, or OS keychain
+  for desktop apps). NEVER store a provider API key anywhere in the app.
+
+---
+
 ## Completion checklist — nothing missed
 
 - [ ] `pw_access.py` added, `APP_NAME` set to the exact sheet header
@@ -117,4 +141,5 @@ That's all a human does. Everything below is for the AI.
 - [ ] `check_allowed()` gates every run and denies on failure
 - [ ] all provider calls go through `pw_access` (no direct provider calls remain)
 - [ ] no API keys left in `.env`, code, or build
+- [ ] session = 7 days; sign-in is `@pw.live`-only and not auto-opened on startup
 - [ ] a real run logged a row to the `Usage Cost` tab

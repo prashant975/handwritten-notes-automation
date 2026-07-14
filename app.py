@@ -697,7 +697,7 @@ if results:
             if r.get("tracking"):
                 tracking = str(r["tracking"])
                 if "not updated" in tracking.lower() or "failed" in tracking.lower():
-                    st.warning(f"Usage saved locally, but spreadsheet sync failed: {tracking}")
+                    st.warning(f"Usage logging failed on the PW proxy: {tracking}")
                 else:
                     st.caption(f"Usage tracked via {tracking}.")
             for warning in r.get("warnings") or []:

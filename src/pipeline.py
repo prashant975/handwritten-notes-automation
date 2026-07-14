@@ -19,6 +19,17 @@ from .slide_filter import filter_slides
 from .utils import chunked, copy_input, ensure_dir, make_run_id, safe_name, write_json, zip_dir
 
 
+def _concise_notes_stem(chapter_title: str, fallback: str) -> str:
+    """Generic, filesystem-safe base name for the output DOCX/PDF.
+
+    Uses the cleaned chapter title — derive_chapter_title() has already stripped
+    trailing boilerplate like 'Class Notes Physical Chemistry By ... Sir' — so
+    'Structure_of_Atom_15_Class_Notes_..._Sir' -> 'Structure_of_Atom_15', which
+    the caller turns into 'Structure_of_Atom_15_Concise_Notes'.
+    """
+    return safe_name(chapter_title) or safe_name(fallback) or "Notes"
+
+
 def _api_call_metadata(resp, **extra) -> dict:
     metadata = {"provider": resp.provider, "model": resp.model}
     metadata.update(extra)
@@ -80,9 +91,9 @@ def rebuild_outputs(
     if chapter_title is None:
         chapter_title = derive_chapter_title(stem)
     output_dir = ensure_dir(run_dir / "output")
-    stem = safe_name(stem)
+    output_stem = _concise_notes_stem(chapter_title, stem)
     (run_dir / "notes_raw.txt").write_text(edited_notes_text, encoding="utf-8")
-    docx_path = output_dir / f"{stem}_handwritten_notes.docx"
+    docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
     docx_path, warnings = write_notes_docx(
         edited_notes_text, docx_path, slides, run_dir=run_dir,
         image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy,
@@ -234,9 +245,9 @@ def run_pipeline(
             usage_logged = usage_session.flush() is not None
 
         output_dir = ensure_dir(run_dir / "output")
-        stem = safe_name(input_path.stem)
-        docx_path = output_dir / f"{stem}_handwritten_notes.docx"
         chapter_title = derive_chapter_title(input_path.stem)
+        output_stem = _concise_notes_stem(chapter_title, input_path.stem)
+        docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
         docx_path, docx_warnings = write_notes_docx(notes_text, docx_path, slides, run_dir=run_dir, image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy, subject=subject, chapter_title=chapter_title)
         warnings.extend(docx_warnings)
         pdf_path, pdf_warning = export_docx_to_pdf(docx_path, output_dir)
