@@ -15,7 +15,7 @@ from src.ai_client import GeminiError
 from src.config import APP_NAME, DEFAULT_MODEL
 from src.pipeline import run_pipeline
 
-st.set_page_config(page_title=APP_NAME, layout="wide")
+st.set_page_config(page_title="Concise Notes Automation", layout="wide")
 
 BASE_DIR = Path(os.getenv("HANDWRITTEN_NOTES_ROOT", str(Path(__file__).parent))).expanduser()
 LOGO_PATH = BASE_DIR / "assets" / "pw_logo.png"
@@ -410,9 +410,9 @@ def _render_login_page() -> None:
         st.markdown(
             """
             <div class="auth-kicker">Restricted profile login</div>
-            <div class="auth-title">Handwritten Notes Automation</div>
+            <div class="auth-title">Concise Notes Automation</div>
             <div class="auth-copy">
-                Sign in with your Google account to generate PW-style handwritten notes.
+                Sign in with your Google account to generate PW-style Concise Notes.
                 Access is limited to approved email addresses from the app allowlist.
             </div>
             """,
@@ -508,7 +508,7 @@ st.markdown(
         <div class="app-brand">
             {logo_html.replace("app-brand-logo", "app-logo")}
             <div>
-                <div class="app-title">Handwritten Notes Automation</div>
+                <div class="app-title">Concise Notes Automation</div>
                 <div class="app-subtitle">Upload a PDF or PowerPoint and download generated notes.</div>
             </div>
         </div>
@@ -517,10 +517,16 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# ---- Fixed configuration (no user-facing settings) -------------------------
-LANGUAGE = "English"
+# ---- Fixed configuration --------------------------------------------------
 MODE = "summary"
-SUBJECT = "auto"            # auto-detected from the file
+# Subject + notes language are chosen by the user in the upload panel below.
+SUBJECT_OPTIONS = {
+    "Auto-detect": "auto",
+    "Biology": "biology",
+    "Physics": "physics",
+    "Chemistry": "chemistry",
+}
+LANGUAGE_OPTIONS = ["English", "Hindi"]
 SEND_IMAGES = True
 STRICT_FILTER = True
 DTP_POLICY = "hide_note_insert_image"
@@ -620,7 +626,24 @@ with st.container(border=True):
         label_visibility="collapsed",
         key=f"lecture_files_{st.session_state.uploader_key}",
     )
-    run_button = st.button("Generate handwritten notes", type="primary", disabled=not uploaded_files, use_container_width=True)
+    opt_col1, opt_col2 = st.columns(2)
+    with opt_col1:
+        subject_label = st.selectbox(
+            "Subject",
+            list(SUBJECT_OPTIONS.keys()),
+            index=0,
+            help="Pick the subject, or let the app detect it from the file.",
+        )
+    with opt_col2:
+        language_label = st.selectbox(
+            "Notes language",
+            LANGUAGE_OPTIONS,
+            index=0,
+            help="The language the generated notes should be written in.",
+        )
+    SUBJECT = SUBJECT_OPTIONS[subject_label]
+    LANGUAGE = language_label
+    run_button = st.button("Generate Concise Notes", type="primary", disabled=not uploaded_files, use_container_width=True)
 
 if run_button and uploaded_files:
     google_token = _google_proxy_token()
@@ -648,7 +671,7 @@ if run_button and uploaded_files:
         total = len(uploaded_files)
         # Animated status container so it's always clear the task is running
         # (a plain progress bar can look "stuck" during the long AI call).
-        with st.status(f"Generating handwritten notes for {total} file(s)…", expanded=True) as status:
+        with st.status(f"Generating Concise Notes for {total} file(s)…", expanded=True) as status:
             progress = st.progress(0.0, text="Starting…")
             with tempfile.TemporaryDirectory() as tmpdir:
                 for i, uploaded in enumerate(uploaded_files, start=1):

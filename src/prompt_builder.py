@@ -32,6 +32,26 @@ def format_slides(slides: list[SlideData]) -> str:
     return "\n".join(chunks)
 
 
+def _language_rule(language_code: str) -> str:
+    """A hard, template-independent directive that forces the output language.
+
+    The slide text is often English even for a Hindi class, so without this the
+    model tends to answer in English. Kept explicit about what stays in English
+    (terms, formulas, NCERT wording) and about preserving the English DTP-note
+    format that the downstream parser depends on.
+    """
+    if (language_code or "en").lower() == "hi":
+        return (
+            "\n- LANGUAGE (MANDATORY): Write ALL notes in HINDI using Devanagari script — topic "
+            "headings, bullets, and explanations. Even when the slide text is in English, the notes "
+            "you write MUST be in Hindi. Keep ONLY scientific/technical terms, proper nouns, chemical "
+            "formulas, numbers, units, and exact NCERT English wording in English — do not translate "
+            "those. Keep the section label 'Concepts Covered in the Class' EXACTLY in English, and "
+            "keep every '(Note to DTP: ...)' line in the EXACT English bracket format shown."
+        )
+    return "\n- LANGUAGE (MANDATORY): Write ALL notes in ENGLISH."
+
+
 def build_generation_prompt(subject: str, mode: str, language_code: str, slides: list[SlideData], *, chunk_label: str = "") -> str:
     template = load_prompt_template(subject, mode, language_code)
     label = f"\nYou are processing chunk: {chunk_label}." if chunk_label else ""
@@ -58,7 +78,7 @@ Important automation instructions:
 - If a slide image is attached and text extraction misses handwritten annotations, read the image and include the instructional annotations.
 - Exclude questions, answer options, QR/ads/homework/thank-you content.
 - If a slide has both instructional content and question boxes, keep only the instructional content.
-- Do not mention that you used AI. Output only the final notes content.{subject_rules}
+- Do not mention that you used AI. Output only the final notes content.{subject_rules}{_language_rule(language_code)}
 {label}
 
 SLIDE DATA STARTS BELOW
@@ -79,7 +99,7 @@ Rules:
 - Remove repeated Concepts Covered items.
 - Merge duplicate headings only when they are the same heading from continuation slides.
 - Keep DTP notes with their slide numbers exactly.
-- Output only the final notes, no extra commentary.{brevity}
+- Output only the final notes, no extra commentary.{brevity}{_language_rule(language_code)}
 
 PARTIAL NOTES START BELOW
 

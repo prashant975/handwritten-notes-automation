@@ -42,13 +42,14 @@ def is_kalam_installed() -> bool:
 
 
 def derive_chapter_title(stem: str) -> str:
-    """Turn an uploaded file's stem into a readable chapter title.
+    """Turn an uploaded file's stem into a readable chapter title (shown on the
+    document cover only — the output file name uses the uploaded name as-is).
 
     'Cell_-_The_Unit_of_Life_02_Class_Notes_1' -> 'Cell - The Unit of Life 02'
     """
     name = stem.replace("_", " ")
     name = re.sub(r"\s+", " ", name).strip()
-    # Drop a trailing copy index like "(1)" or " 1" first.
+    # Drop a trailing copy index like "(1)" first.
     name = re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", name).strip()
     # Then drop trailing boilerplate like "Class Notes" / "Concise Notes"
     # (and anything after it), but keep lecture numbers that are part of the title.
@@ -92,7 +93,7 @@ def add_title_block(doc, subject: str, chapter_title: str):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_after = Pt(14)
-        _apply_font(p.add_run(chapter_title), size=Pt(22), bold=True, italic=True, underline=True, color=TITLE_COLOR)
+        _apply_font(p.add_run(chapter_title), size=Pt(22), bold=True, italic=False, underline=True, color=TITLE_COLOR)
 
 
 def _add_page_field(paragraph, *, bracket=True, color=None, size=Pt(11)):
