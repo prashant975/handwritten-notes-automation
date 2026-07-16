@@ -29,9 +29,9 @@ python verify_onboarding.py .env "<optional token>"
 
 - "not authorized for this app": your email isn't in the app's Whitelisted
   column, or you signed in with a non-`@pw.live` account.
-- `gemini proxy error 401`: the Google token is missing/expired — sign in again.
-- Proxy unreachable: the app falls back to the local email allowlist for access,
-  but Gemini calls still need the proxy to be up.
+- `vertex token error 401` / token missing or expired: sign in again.
+- Proxy unreachable: the app **fails closed** — no one can generate until the
+  proxy is reachable again. There is no local allowlist fallback. Wait and retry.
 - Empty response: prompt too large. Reduce slides per call.
 
 ## Windows activation

@@ -558,6 +558,14 @@ def _result_to_dict(name: str, result) -> dict:
 
 
 def _notes_to_markdown(notes: str) -> str:
+    # Normalise the same maths the DOCX writer does, so the preview shows real
+    # symbols and — crucially — multiplication asterisks are turned into "×"
+    # before st.markdown can eat them as emphasis (e.g. "2*v_A*v_B").
+    try:
+        from src.docx_writer import _normalize_math
+    except Exception:
+        def _normalize_math(t):
+            return t
     out: list[str] = []
     for raw in notes.splitlines():
         line = raw.rstrip()
@@ -569,13 +577,13 @@ def _notes_to_markdown(notes: str) -> str:
         content = line.strip()
         bullet_m = re.match(r"^(\*|•|·|-|–)\s+(.*)$", content)
         if bullet_m:
-            out.append("  " * level + "- " + bullet_m.group(2).strip())
+            out.append("  " * level + "- " + _normalize_math(bullet_m.group(2).strip()))
         elif content[0].isdigit() and content[1:2] in {".", ")"}:
-            out.append("  " * level + content)
+            out.append("  " * level + _normalize_math(content))
         elif "note to dtp" in content.lower():
             continue  # hidden in output, so hide in preview too
         else:
-            out.append(content)
+            out.append(_normalize_math(content))
     return "\n".join(out)
 
 

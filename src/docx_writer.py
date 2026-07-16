@@ -79,49 +79,82 @@ _MD_RE = re.compile(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*)")
 
 _GREEK = {
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
-    "theta": "θ", "lambda": "λ", "mu": "μ", "pi": "π", "rho": "ρ",
-    "sigma": "σ", "tau": "τ", "phi": "φ", "omega": "ω",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "rho": "ρ",
+    "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "chi": "χ",
+    "psi": "ψ", "omega": "ω", "pi": "π",
 }
 _GREEK_UPPER = {
     "delta": "Δ", "omega": "Ω", "sigma": "Σ", "phi": "Φ", "theta": "Θ",
-    "lambda": "Λ", "pi": "Π", "gamma": "Γ",
+    "lambda": "Λ", "pi": "Π", "gamma": "Γ", "psi": "Ψ", "xi": "Ξ",
 }
 _GREEK_RE = re.compile(r"\b(" + "|".join(_GREEK) + r")\b", re.I)
 
+# Chars that mark a maths context. A bare greek WORD (e.g. "theta") is only
+# turned into a symbol when it touches one of these — so science prose like
+# "alpha particle", "beta decay", "gamma rays", "sigma bond" or "pi bond"
+# keeps its English words instead of becoming α/β/γ/σ/π.
+_MATH_NEIGHBOUR = set("=+-*/^_()[]{}×·√±≤≥<>∫∑∏°|⇒→∝≈≡0123456789")
+
 
 def _greek_sub(m):
-    """'theta' -> θ but 'Delta' -> Δ (capitalised word = capital letter)."""
+    """Bare greek word -> symbol, but ONLY in a maths context (see above).
+    'theta' -> θ, 'Delta' -> Δ (capitalised word => capital letter)."""
+    s, i, j = m.string, m.start(), m.end()
+    before = s[:i].rstrip()[-1:]
+    after = s[j:].lstrip()[:1]
+    if before not in _MATH_NEIGHBOUR and after not in _MATH_NEIGHBOUR:
+        return m.group(1)                       # prose word -> leave untouched
     word = m.group(1)
     low = word.lower()
     if word[0].isupper() and low in _GREEK_UPPER:
         return _GREEK_UPPER[low]
     return _GREEK[low]
 
+
 # LaTeX command -> symbol. Models emit LaTeX for maths even when told not to,
 # so it is normalised here rather than trusted away in the prompt.
 _LATEX_SYMBOLS = {
-    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓",
+    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓", "ast": "×",
     "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
-    "approx": "≈", "equiv": "≡", "propto": "∝", "infty": "∞",
+    "approx": "≈", "equiv": "≡", "propto": "∝", "infty": "∞", "cong": "≅",
     "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒",
+    "leftrightarrow": "↔", "implies": "⇒", "iff": "⇔",
     "sum": "Σ", "prod": "Π", "int": "∫", "partial": "∂", "nabla": "∇",
     "degree": "°", "circ": "°", "angle": "∠", "perp": "⊥", "parallel": "∥",
-    "therefore": "∴", "because": "∵", "sqrt": "√",
+    "therefore": "∴", "because": "∵", "sqrt": "√", "cdots": "⋯", "ldots": "…",
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "Delta": "Δ",
     "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ",
-    "Theta": "Θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "Lambda": "Λ",
-    "mu": "μ", "nu": "ν", "xi": "ξ", "rho": "ρ", "sigma": "σ", "Sigma": "Σ",
-    "tau": "τ", "upsilon": "υ", "phi": "φ", "Phi": "Φ", "chi": "χ",
-    "psi": "ψ", "Psi": "Ψ", "omega": "ω", "Omega": "Ω", "pi": "π", "Pi": "Π",
+    "vartheta": "θ", "Theta": "Θ", "iota": "ι", "kappa": "κ", "lambda": "λ",
+    "Lambda": "Λ", "mu": "μ", "nu": "ν", "xi": "ξ", "Xi": "Ξ", "rho": "ρ",
+    "varrho": "ρ", "sigma": "σ", "Sigma": "Σ", "tau": "τ", "upsilon": "υ",
+    "phi": "φ", "varphi": "φ", "Phi": "Φ", "chi": "χ", "psi": "ψ", "Psi": "Ψ",
+    "omega": "ω", "Omega": "Ω", "pi": "π", "Pi": "Π",
 }
 
-# $..$, $$..$$, \(..\), \[..\] wrappers around a formula.
-_MATH_DELIM_RE = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
-# \frac{a}{b}, \sqrt{x}, \sqrt[n]{x}, \vec{v}, \text{x}
+# Combining accents for vector / hat / bar notation.
+_HAT, _ARROW, _BAR = "̂", "⃗", "̄"
+_PRE_HAT = {"i": "î", "j": "ĵ"}
+
+
+def _accent(base: str, comb: str) -> str:
+    base = base.strip()
+    if not base:
+        return base
+    if comb == _HAT and len(base) == 1 and base in _PRE_HAT:
+        return _PRE_HAT[base]
+    return base + comb                          # combining char attaches to last letter
+
+
+# Always-safe display math: $$..$$, \(..\), \[..\]. Inline $..$ is handled
+# separately so currency ("$5 and $10") is never mistaken for maths.
+_DISPLAY_MATH_RE = re.compile(r"\$\$(.+?)\$\$|\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
+_INLINE_DOLLAR_RE = re.compile(r"\$([^$\n]{1,300}?)\$")
+# \frac{a}{b}, \sqrt{x}, \sqrt[n]{x}, \vec{v}, \hat{i}, \text{x}
 _FRAC_RE = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
 _SQRT_BRACE_RE = re.compile(r"\\sqrt\s*(?:\[([^\]]*)\])?\s*\{([^{}]*)\}")
-_VEC_RE = re.compile(r"\\(?:vec|overrightarrow|overline|hat|bar)\s*\{([^{}]*)\}")
-_WRAP_RE = re.compile(r"\\(?:text|textbf|textit|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}")
+_ACCENT_RE = re.compile(r"\\(vec|overrightarrow|hat|widehat|bar|overline)\s*(?:\{([^{}]*)\}|([A-Za-z0-9]))")
+_WRAP_RE = re.compile(r"\\(?:text|textbf|textit|mathrm|mathbf|mathit|mathsf|operatorname)\s*\{([^{}]*)\}")
 _LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
 
 # A "*" that means multiplication: either tight between operands ("2*v_A") or
@@ -131,28 +164,56 @@ _LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
 # split, otherwise "2*v_A*v_B" is read as italics and the asterisks are eaten.
 _MULT_RE = re.compile(r"(?<=[0-9A-Za-z_)\]])(?:\*|\s+\*\s+)(?=[0-9A-Za-z_(\[√])")
 
-# "v_AB", "v_A^2", "x_{net}" -> base + sub/superscript token.
-_SCRIPT_RE = re.compile(r"([_^])(\{[^}]{1,40}\}|[A-Za-z0-9]+)")
+# Unit-vector / hat notation written as "i^", "k^" (a letter then a caret that
+# is NOT the start of a superscript). Turned into î / k̂ etc.
+_HAT_CARET_RE = re.compile(r"([A-Za-z])\^(?![A-Za-z0-9{])")
+
+# base + sub/superscript token. The token is a SINGLE character class so
+# "H_2O" subscripts only the "2" (not "2O"), while "v_AB" still subscripts "AB".
+_SCRIPT_RE = re.compile(r"([_^])(\{[^}]{1,40}\}|\d+|[A-Za-z]+)")
+
+
+def _accent_sub(m):
+    kind, braced, single = m.group(1), m.group(2), m.group(3)
+    base = braced if braced is not None else (single or "")
+    comb = {"hat": _HAT, "widehat": _HAT, "vec": _ARROW, "overrightarrow": _ARROW,
+            "bar": _BAR, "overline": _BAR}[kind]
+    return _accent(base, comb)
+
+
+def _unwrap_display(m):
+    return next(g for g in m.groups() if g is not None)
+
+
+def _unwrap_inline_dollar(m):
+    """Only treat $..$ as maths when the content actually looks like maths,
+    so prose amounts like "$5 and $10" keep their dollar signs."""
+    inner = m.group(1)
+    if re.search(r"[\\_^=]", inner) or re.search(r"[A-Za-z]\s*[+\-/×·]\s*[A-Za-z0-9]", inner):
+        return inner
+    return m.group(0)
 
 
 def _normalize_math(text: str) -> str:
     """Normalise any maths notation the model emits into plain readable symbols.
 
-    Handles LaTeX (\\frac, \\sqrt, \\theta, $...$), ASCII (sqrt(), *, theta,
-    <=) and already-correct Unicode, so the result only ever uses real symbols
-    plus '_'/'^' markers, which _add_scripted_runs turns into sub/superscripts.
-    Runs BEFORE the markdown split so formula asterisks are never read as italics.
+    Handles LaTeX (\\frac, \\sqrt, \\theta, \\hat, $...$), ASCII (sqrt(), *, i^,
+    theta, <=) and already-correct Unicode, so the result only ever uses real
+    symbols plus '_'/'^' markers that _add_scripted_runs turns into
+    sub/superscripts. Runs BEFORE the markdown split so formula asterisks are
+    never read as italics.
     """
-    # LaTeX wrappers / delimiters / spacing.
     text = text.replace("\\\\", " ")
+    text = re.sub(r"\\([%&#{}$_])", r"\1", text)      # unescape \% \& \{ \$ ...
     text = re.sub(r"`([^`]*)`", r"\1", text)          # `v_AB` code ticks
-    text = _MATH_DELIM_RE.sub(lambda m: next(g for g in m.groups() if g is not None), text)
+    text = _DISPLAY_MATH_RE.sub(_unwrap_display, text)
+    text = _INLINE_DOLLAR_RE.sub(_unwrap_inline_dollar, text)
     text = re.sub(r"\\left\s*|\\right\s*", "", text)
-    text = re.sub(r"\\[,;:!>]", " ", text)
+    text = re.sub(r"\\[,;:!> ]", " ", text)
     # Structural LaTeX, innermost-first (a few passes handles simple nesting).
     for _ in range(4):
         new = _WRAP_RE.sub(r"\1", text)
-        new = _VEC_RE.sub(r"\1", new)
+        new = _ACCENT_RE.sub(_accent_sub, new)
         new = _FRAC_RE.sub(r"(\1)/(\2)", new)
         new = _SQRT_BRACE_RE.sub(lambda m: f"√({m.group(2)})", new)
         if new == text:
@@ -164,15 +225,22 @@ def _normalize_math(text: str) -> str:
     # ASCII maths.
     text = re.sub(r"\bsqrt\s*\(", "√(", text, flags=re.I)
     text = _MULT_RE.sub("×", text)
+    text = _HAT_CARET_RE.sub(lambda m: _accent(m.group(1), _HAT), text)
+    text = re.sub(r"\^\s*\{?\s*°\s*\}?", "°", text)   # 30^\circ / 30^{°} -> 30°
     text = _GREEK_RE.sub(_greek_sub, text)
     for src, dst in (("<=", "≤"), (">=", "≥"), ("!=", "≠"), ("+/-", "±"),
-                     ("->", "→"), ("&gt;", ">"), ("&lt;", "<")):
+                     ("->", "→"), ("&gt;", ">"), ("&lt;", "<"), ("&amp;", "&")):
         text = text.replace(src, dst)
     return text
 
 
 def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, highlight):
-    """Add `clean` as runs, rendering v_AB / x^2 as real sub/superscript runs."""
+    """Add `clean` as runs, rendering H_2O / v_AB / x^2 as real sub/superscripts.
+
+    A letter subscript/superscript only fires when its base is a lone atom (a
+    single symbol not sitting inside a word), so ordinary prose that happens to
+    contain an underscore (e.g. "slides_raw.json") is left alone. Digit and
+    braced tokens always apply (chemistry counts, exponents, x_{net})."""
 
     def _emit(chunk: str, *, sub: bool = False, sup: bool = False):
         if not chunk:
@@ -188,8 +256,15 @@ def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, h
 
     pos = 0
     for m in _SCRIPT_RE.finditer(clean):
-        _emit(clean[pos:m.start()])
         token = m.group(2)
+        is_letters = token[0].isalpha()
+        prev = clean[m.start() - 1] if m.start() > 0 else ""
+        prev2 = clean[m.start() - 2] if m.start() >= 2 else ""
+        # A letter subscript on a base that is itself inside a word is almost
+        # certainly prose (file_name, slides_raw) -> emit literally.
+        if is_letters and prev.isalnum() and prev2.isalnum():
+            continue
+        _emit(clean[pos:m.start()])
         if token.startswith("{"):
             token = token[1:-1]
         _emit(token, sub=m.group(1) == "_", sup=m.group(1) == "^")
@@ -234,6 +309,15 @@ def _is_bullet(line: str) -> bool:
     return bool(re.match(r"^\s*\d+[.)]\s+", line))
 
 
+_FORMULA_HINT_RE = re.compile(r"[=√×÷≤≥≠±∝∫∑]|[A-Za-z0-9]\^|[A-Za-z0-9]_[A-Za-z0-9{]|\\[A-Za-z]+|\$")
+
+
+def _looks_like_formula(s: str) -> bool:
+    """A standalone equation line (e.g. 'v_AB = v_A - v_B' or 'F = m*a') must not
+    be rendered as a green highlighted heading."""
+    return bool(_FORMULA_HINT_RE.search(s))
+
+
 def _is_heading(line: str) -> bool:
     s = line.strip()
     if not s or _is_bullet(s) or _is_dtp(s):
@@ -243,6 +327,8 @@ def _is_heading(line: str) -> bool:
     if s.startswith("#"):
         return True
     if s.endswith(".") or s.endswith("।"):
+        return False
+    if _looks_like_formula(s):
         return False
     return True
 

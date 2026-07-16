@@ -72,7 +72,7 @@ def build_generation_prompt(subject: str, mode: str, language_code: str, slides:
             "\n- SUMMARY MODE (STRICT): Keep it short. Capture only the key concepts and "
             "essential points as brief one-line bullets. Do NOT write long explanations, "
             "background, examples, or elaboration. Prefer the fewest words that preserve the "
-            "meaning. Aim for roughly 8-10% of the source length. Every bullet must be a single "
+            "meaning. Aim for roughly 10-15% of the source length. Every bullet must be a single "
             "short line."
         )
     return f"""{template}

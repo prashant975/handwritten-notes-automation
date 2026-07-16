@@ -19,7 +19,7 @@ def _collect_inputs(input_path: Path) -> list[Path]:
 def main():
     parser = argparse.ArgumentParser(description="Generate handwritten-style lecture notes from PPT/PDF.")
     parser.add_argument("--input", required=True, help="Path to a lecture PDF/PPTX/PPT, or a folder of them (batch mode)")
-    parser.add_argument("--subject", required=True, choices=["biology", "physics", "chemistry"])
+    parser.add_argument("--subject", default="auto", choices=["auto", "biology", "physics", "chemistry"], help="Subject, or 'auto' to detect it from the file (default: auto)")
     parser.add_argument("--language", default="English", choices=["English", "Hindi", "en", "hi"])
     parser.add_argument("--mode", default="summary", choices=["summary", "complete"])
     parser.add_argument("--google-token", default=os.getenv("PW_GOOGLE_TOKEN", ""), help="Signed-in @pw.live Google access/id token (or set PW_GOOGLE_TOKEN). Required unless --allow-mock is used; the PW proxy holds the Gemini key.")

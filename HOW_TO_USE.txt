@@ -71,12 +71,13 @@ GENERATE NOTES
      guess is ever wrong.
 3. Click "Generate Concise Notes" and wait. Large files can take a
    few minutes.
-3. For each file you can download:
+4. For each file you can download:
    - DOCX  (editable Word file)
    - PDF   (needs Word or LibreOffice installed)
    - ZIP   (everything from that run)
 
-   Files are named after the chapter, for example:
+   Files are named after your uploaded file, for example an upload named
+   "Structure_of_Atom_15.pdf" produces:
        Structure_of_Atom_15_Concise_Notes.docx
        Structure_of_Atom_15_Concise_Notes.pdf
 

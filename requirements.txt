@@ -1,11 +1,14 @@
 # All AI (Gemini) calls go through the shared PW proxy via pw_access.py, which
 # talks to the proxy over plain HTTPS (requests). The app ships no provider SDK
 # and no provider key — so no google-genai / google-auth here.
-streamlit[auth]>=1.42
+# streamlit floor is 1.58: earlier releases lack st.user.tokens (expose_tokens),
+# which the PW proxy login depends on — an older Streamlit denies every user.
+streamlit[auth]>=1.58
 python-dotenv>=1.0
 requests>=2.31
 pymupdf>=1.24
 python-pptx>=0.6.23
 python-docx>=1.1
 Pillow>=10.0
+numpy>=1.24
 pywin32>=306; platform_system == "Windows"

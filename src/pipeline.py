@@ -27,73 +27,6 @@ def _api_call_metadata(resp, **extra) -> dict:
     return metadata
 
 
-def _load_slides_from_run(run_dir: Path) -> list[SlideData]:
-    """Reconstruct SlideData objects from a run's slides_raw.json (for rebuilds)."""
-    import json
-
-    data = json.loads((run_dir / "slides_raw.json").read_text(encoding="utf-8"))
-    slides: list[SlideData] = []
-    for s in data:
-        img = s.get("image_path")
-        slides.append(
-            SlideData(
-                slide_no=s["slide_no"],
-                heading=s.get("heading", ""),
-                text=s.get("text", ""),
-                cleaned_text=s.get("cleaned_text", ""),
-                image_path=Path(img) if img else None,
-                source_type=s.get("source_type", ""),
-                metadata=s.get("metadata", {}) or {},
-            )
-        )
-    return slides
-
-
-def rebuild_outputs(
-    run_dir: Path,
-    edited_notes_text: str,
-    *,
-    stem: str,
-    image_insert_mode: str = "smart_crop",
-    dtp_note_policy: str = "keep_note_and_insert_image",
-    subject: str = "",
-    chapter_title: str | None = None,
-) -> tuple[Path, Path | None, list[str]]:
-    """Regenerate DOCX/PDF from (possibly user-edited) notes, reusing a run folder.
-
-    Returns (docx_path, pdf_path, warnings). Used by the UI's edit-and-rebuild flow.
-    Subject/chapter default to values recorded in run_metadata.json when omitted.
-    """
-    import json
-
-    run_dir = Path(run_dir)
-    slides = _load_slides_from_run(run_dir)
-    meta_path = run_dir / "run_metadata.json"
-    if (not subject or chapter_title is None) and meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            subject = subject or meta.get("subject", "")
-            if chapter_title is None:
-                chapter_title = derive_chapter_title(Path(meta.get("input_file", stem)).stem)
-        except Exception:
-            pass
-    if chapter_title is None:
-        chapter_title = derive_chapter_title(stem)
-    output_dir = ensure_dir(run_dir / "output")
-    output_stem = safe_name(stem)
-    (run_dir / "notes_raw.txt").write_text(edited_notes_text, encoding="utf-8")
-    docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
-    docx_path, warnings = write_notes_docx(
-        edited_notes_text, docx_path, slides, run_dir=run_dir,
-        image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy,
-        subject=subject, chapter_title=chapter_title,
-    )
-    pdf_path, pdf_warning = export_docx_to_pdf(docx_path, output_dir)
-    if pdf_warning:
-        warnings.append(pdf_warning)
-    return docx_path, pdf_path, warnings
-
-
 def _extract_input(input_path: Path, run_dir: Path) -> tuple[list[SlideData], list[str]]:
     ext = input_path.suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
@@ -130,6 +63,7 @@ def run_pipeline(
     docx_path: Path | None = None
     pdf_path: Path | None = None
     zip_path: Path | None = None
+    usage_session = None
     try:
         copied_input = copy_input(input_path, run_dir / "input")
         slides, extract_warnings = _extract_input(copied_input, run_dir)
@@ -183,7 +117,7 @@ def run_pipeline(
                 return i, resp
 
             # Run chunk calls concurrently (they are network-bound). Cap workers to
-            # stay clear of rate limits; the client already retries on 429.
+            # stay clear of rate limits; the client retries transient 429/5xx.
             chunk_results: dict[int, object] = {}
             with ThreadPoolExecutor(max_workers=min(4, max(1, len(chunks)))) as ex:
                 futures = [ex.submit(_run_chunk, i, ch) for i, ch in enumerate(chunks, start=1)]
@@ -271,6 +205,13 @@ def run_pipeline(
         return PipelineResult(run_dir=run_dir, docx_path=docx_path, pdf_path=pdf_path, zip_path=zip_path, raw_notes_path=raw_notes_path, warnings=warnings, metadata=run_metadata)
     except Exception as e:
         warnings.append(str(e))
+        # Vertex is billed per successful call, so log whatever usage already
+        # accumulated before the failure — otherwise real cost goes unrecorded.
+        if usage_session is not None:
+            try:
+                usage_session.flush()
+            except Exception:
+                pass
         try:
             write_json(run_dir / "error.json", {"error": str(e), "warnings": warnings})
             zip_path = zip_dir(run_dir, run_dir.with_suffix(".zip"))

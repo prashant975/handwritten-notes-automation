@@ -81,7 +81,7 @@ def main() -> None:
     if not _port_is_free(PORT):
         print("")
         print(f"Port {PORT} is already in use.")
-        print("Close any old HandwrittenNotesApp.exe window/process, then run this app again.")
+        print("Close any old HandwrittenNotesAppTeam.exe window/process, then run this app again.")
         print("")
         input("Press Enter to exit...")
         return
@@ -116,7 +116,7 @@ def main() -> None:
         "browser.serverAddress": "localhost",
     }
     print("")
-    print(f"Opening Handwritten Notes Automation at {url}")
+    print(f"Opening Concise Notes Automation at {url}")
     print("Keep this window open while using the app.")
     print("")
     _open_browser_when_ready(url)

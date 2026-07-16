@@ -181,8 +181,8 @@ runs/run_.../
   input/
   rendered/
   output/
-    *_handwritten_notes.docx
-    *_handwritten_notes.pdf
+    *_Concise_Notes.docx
+    *_Concise_Notes.pdf
   notes_raw.txt
   filter_report.json
   run_metadata.json

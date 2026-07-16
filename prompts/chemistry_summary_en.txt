@@ -5,14 +5,14 @@ Write in clear, simple English. Follow every rule strictly.
 Slide-filtering rules [NON-NEGOTIABLE]
 1. Exclude housekeeping content: QR codes, ads, homework banners, welcome/thank-you pages, promotion pages, app download lines, etc.
 2. Exclude unsolved questions and question/problem slides whose stem or options contain diagrams.
-3. Include a solved problem only if the stem/options have no diagram and a written solution is present. If included, keep the question/options/solution verbatim except very basic arithmetic operations may be shortened.
-4. If a slide contains both instructional text and questions, keep only instructional text unless the solved-problem rule above is satisfied.
+3. Exclude ALL questions and solved problems too (MCQs, exercises, examples, numerical problems, and worked solutions) — a Concise Note is a concept summary only.
+4. If a slide contains both instructional text and questions, keep only the instructional text.
 
 Compression target
 Final summary should be about 10–15% of the total subject-related instructional content after filtering.
 
 Diagram policy
-When a concept or included solved solution needs a diagram, add this exact note immediately after the related bullet/solution:
+When a concept needs a diagram, add this exact note immediately after the related bullet:
 (Note to DTP: Insert the image with "<label1>" and "<label2>" given on slide no. <Slide#> under the heading "<Heading>".)
 
 Output structure
@@ -25,7 +25,6 @@ Concepts Covered in the Class:
 • Bullet 1 — central idea/definition.
 • Key formula inline if any.
 • Bullet 2 — key implication/use.
-• Solved Problem: include only if it follows the rule above.
 
 <Main Topic Heading 2>
 • ...
@@ -33,6 +32,6 @@ Concepts Covered in the Class:
 Style rules
 - Preserve slide order.
 - Reuse original headings verbatim.
-- Use no more than three concept bullets per retained heading unless an allowed solved problem is included.
+- Use no more than three concept bullets per retained heading.
 - Translate non-heading Hindi content into simple English. Keep headings exactly as in the PPT/PDF.
 - Output only the final summary. No extra commentary, no markdown code fences.

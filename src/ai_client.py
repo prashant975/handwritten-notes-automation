@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,11 +86,12 @@ def _extract_text_from_response(data: dict[str, Any]) -> str:
     return ""
 
 
-# The proxy is hosted on Vercel, whose serverless functions reject any request
-# body larger than ~4.5 MB. Pages are rendered as 2x PNGs (often 1-3 MB each),
-# so we downscale + re-encode them to JPEG before base64 to stay well under that
-# limit, and keep a hard byte budget as a final safety net.
-_PROXY_BODY_BUDGET = 4_000_000          # bytes; < Vercel's ~4.5 MB hard limit
+# Gemini now goes DIRECT to Vertex AI (not through the Vercel proxy), whose
+# generateContent inline-request limit is ~20 MB. Pages are rendered as 2x PNGs
+# (often 1-3 MB each), so we still downscale + re-encode them to JPEG before
+# base64 to keep requests small and fast, with a generous hard byte budget as a
+# final safety net so a huge deck can't build an oversized request.
+_PROXY_BODY_BUDGET = 18_000_000         # bytes; < Vertex's ~20 MB request limit
 _IMAGE_MAX_DIM = 1600                    # longest edge sent to Gemini
 _IMAGE_JPEG_QUALITY = 80
 
@@ -180,15 +182,24 @@ class GeminiClient:
             )
 
     def _generate_content(self, model: str, body: dict[str, Any]) -> dict[str, Any]:
-        try:
-            resp = pw_access.gemini_generate(
-                self.google_token,
-                model=model,
-                request=body,
-                session=self.session,
-            )
-        except pw_access.PWAccessError as e:
-            raise GeminiError(str(e), provider="pw_proxy") from e
+        # Retry transient Vertex errors (rate limit / 5xx) with backoff. Usage is
+        # only accumulated on a 200 inside pw_access, so retries never double-log.
+        resp = None
+        for attempt in range(4):
+            try:
+                resp = pw_access.gemini_generate(
+                    self.google_token,
+                    model=model,
+                    request=body,
+                    session=self.session,
+                )
+                break
+            except pw_access.PWAccessError as e:
+                transient = any(f" {code}" in str(e) for code in (429, 500, 502, 503, 504))
+                if transient and attempt < 3:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise GeminiError(str(e), provider="pw_proxy") from e
         result = resp.get("result")
         if not isinstance(result, dict):
             raise GeminiError(

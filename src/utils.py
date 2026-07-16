@@ -16,7 +16,12 @@ def make_run_id(prefix: str = "run") -> str:
 
 
 def safe_name(name: str, default: str = "file") -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    # Unicode-aware: keep letters/digits of ANY script plus their combining
+    # marks — \w covers Devanagari consonants, and the extra ranges keep the
+    # vowel signs/matras (ऀ-ॿ) and combining diacriticals so a Hindi
+    # file name survives intact instead of collapsing to "_". Only true
+    # separators/punctuation become "_"; "." and "-" are kept.
+    name = re.sub(r"[^\w.\-̀-ͯऀ-ॿ]+", "_", name, flags=re.UNICODE).strip("._")
     return name or default
 
 
@@ -42,7 +47,9 @@ def zip_dir(src_dir: Path, zip_path: Path) -> Path:
 
 def copy_input(input_path: Path, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dst = dest_dir / safe_name(input_path.name)
+    # Sanitise the stem and keep the real extension, so a run never loses the
+    # suffix that _extract_input dispatches on (would otherwise crash).
+    dst = dest_dir / (safe_name(input_path.stem) + input_path.suffix.lower())
     shutil.copy2(input_path, dst)
     return dst
 

@@ -102,9 +102,58 @@ def _render_ppt_with_powerpoint(ppt_path: Path, run_dir: Path) -> dict[int, Path
         return {}
 
 
+def _convert_ppt_to_pptx(ppt_path: Path, run_dir: Path) -> Path | None:
+    """Convert a legacy binary .ppt to .pptx (python-pptx cannot read .ppt).
+    Tries PowerPoint COM SaveAs, then LibreOffice. Returns the .pptx or None."""
+    out_dir = ensure_dir(run_dir / "converted")
+    if sys.platform == "win32":
+        try:
+            import pythoncom
+            import win32com.client
+
+            pythoncom.CoInitialize()
+            app = win32com.client.DispatchEx("PowerPoint.Application")
+            pres = app.Presentations.Open(str(ppt_path.resolve()), WithWindow=False)
+            out = out_dir / (ppt_path.stem + ".pptx")
+            pres.SaveAs(str(out.resolve()), 24)   # 24 = ppSaveAsOpenXMLPresentation
+            pres.Close()
+            app.Quit()
+            if out.exists():
+                return out
+        except Exception:
+            pass
+    soffice = _find_soffice()
+    if soffice:
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", "pptx", "--outdir", str(out_dir), str(ppt_path)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180,
+            )
+            cands = list(out_dir.glob("*.pptx"))
+            if cands:
+                return cands[0]
+        except Exception:
+            pass
+    return None
+
+
 def extract_pptx(ppt_path: Path, run_dir: Path) -> tuple[list[SlideData], list[str]]:
     warnings: list[str] = []
-    slides = extract_ppt_text(ppt_path)
+    # Legacy .ppt: python-pptx only reads .pptx, so convert first. Rendering
+    # (COM / LibreOffice) still opens the original .ppt fine either way.
+    text_src = ppt_path
+    if ppt_path.suffix.lower() == ".ppt":
+        converted = _convert_ppt_to_pptx(ppt_path, run_dir)
+        if converted:
+            text_src = converted
+    try:
+        slides = extract_ppt_text(text_src)
+    except Exception as e:
+        warnings.append(
+            f"Could not read slide text from this PowerPoint ({e}); generating from "
+            "slide images only. Install Microsoft PowerPoint or LibreOffice, or re-save the file as .pptx."
+        )
+        slides = []
     image_map = _render_ppt_with_powerpoint(ppt_path, run_dir)
     if not image_map:
         try:
@@ -113,6 +162,13 @@ def extract_pptx(ppt_path: Path, run_dir: Path) -> tuple[list[SlideData], list[s
             warnings.append(f"LibreOffice PPT rendering failed: {e}")
     if not image_map:
         warnings.append("PPT slide images were not rendered. Install LibreOffice or Microsoft PowerPoint for image/diagram insertion and vision extraction.")
+    # If text couldn't be read but images rendered, build image-only slides so
+    # the run still produces notes instead of crashing.
+    if not slides and image_map:
+        slides = [
+            SlideData(slide_no=n, heading="", text="", cleaned_text="", source_type="pptx")
+            for n in sorted(image_map)
+        ]
     for s in slides:
         if s.slide_no in image_map:
             s.image_path = image_map[s.slide_no]
