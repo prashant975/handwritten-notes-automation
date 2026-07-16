@@ -55,14 +55,18 @@ def _language_rule(language_code: str) -> str:
 def build_generation_prompt(subject: str, mode: str, language_code: str, slides: list[SlideData], *, chunk_label: str = "") -> str:
     template = load_prompt_template(subject, mode, language_code)
     label = f"\nYou are processing chunk: {chunk_label}." if chunk_label else ""
-    subject_rules = ""
-    if subject.lower() == "physics":
-        subject_rules += (
-            "\n- PHYSICS: Do NOT include any numerical problem solutions, solved examples, "
-            "or step-by-step working. Include only the concept summary and instructional "
-            "notes (definitions, formulas, key points). Keep formulas as reference, but omit "
-            "worked-out solutions and the arithmetic of solving a specific question."
-        )
+    # Applies to EVERY subject: Concise Notes are a concept summary only.
+    subject_rules = (
+        "\n- NO QUESTIONS, NO SOLUTIONS (STRICT, ALL SUBJECTS): Do NOT include any question, "
+        "MCQ, answer option, exercise, practice problem, solved example, illustration, numerical "
+        "problem, or step-by-step solution/working — not even as an example. Include ONLY the "
+        "concept summary: definitions, formulas, and key points. Keep formulas as reference, but "
+        "omit worked-out solutions and the arithmetic of solving any specific question."
+        "\n- FORMULAS: Write formulas in plain text. Use '_' for subscripts and '^' for "
+        "superscripts (e.g. v_AB = v_A - v_B, v_A^2, x_{net}). Write symbols directly: "
+        "√ × ÷ ≤ ≥ ± θ α β Δ π. Never use LaTeX, $...$, code fences, or markdown emphasis "
+        "(* or **) inside a formula — an asterisk is only ever multiplication."
+    )
     if mode.lower() == "summary":
         subject_rules += (
             "\n- SUMMARY MODE (STRICT): Keep it short. Capture only the key concepts and "
@@ -99,6 +103,8 @@ Rules:
 - Remove repeated Concepts Covered items.
 - Merge duplicate headings only when they are the same heading from continuation slides.
 - Keep DTP notes with their slide numbers exactly.
+- Never introduce questions, solved examples, or step-by-step solutions; drop any that slipped in.
+- Keep formula notation exactly as-is ('_' subscripts, '^' superscripts, plain symbols).
 - Output only the final notes, no extra commentary.{brevity}{_language_rule(language_code)}
 
 PARTIAL NOTES START BELOW
