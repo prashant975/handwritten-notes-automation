@@ -4,7 +4,6 @@ import re
 import tempfile
 import os
 import base64
-import html
 import time
 from pathlib import Path
 
@@ -13,7 +12,7 @@ import streamlit as st
 
 import pw_access
 from src.ai_client import GeminiError
-from src.config import APP_NAME, DEFAULT_MODEL
+from src.config import APP_NAME, APP_VERSION, DEFAULT_IMAGE_MODEL, DEFAULT_MODEL, SUBJECTS
 from src.pipeline import run_pipeline
 
 st.set_page_config(page_title="Concise Notes Automation", layout="wide")
@@ -98,12 +97,9 @@ def _proxy_access_status(force: bool = False) -> str:
     return status
 
 
-def _usage_tracking_label(result) -> str:
-    """Usage is now logged by the PW proxy (one Gemini row per file). Reflect
-    whether that write succeeded so the UI can warn on failure."""
-    if (result.metadata or {}).get("usage_logged"):
-        return "PW proxy (one Gemini row in the Usage Cost sheet)"
-    return "PW proxy logging failed — usage was not recorded"
+def _usage_logged(result) -> bool:
+    """Whether the PW proxy recorded this run in the Usage Cost sheet."""
+    return bool((result.metadata or {}).get("usage_logged"))
 
 
 def _logout_user() -> None:
@@ -139,12 +135,23 @@ def _google_token_expired() -> bool:
 
 def _proxy_error_detail(token: str) -> str:
     """One extra allowlist call (only on the error screen) to surface WHY the
-    proxy couldn't verify access, so a stuck user can report/understand it."""
+    proxy couldn't verify access, so a stuck user can report/understand it.
+    Cached for 20s in session state so reruns of the error screen (and multiple
+    render sites in one run) don't stack up extra ~15s network calls."""
+    cached = st.session_state.get("_proxy_err_detail")
+    if isinstance(cached, dict) and (time.time() - float(cached.get("ts", 0))) < 20:
+        return str(cached.get("detail", ""))
+    detail = _proxy_error_detail_uncached(token)
+    st.session_state["_proxy_err_detail"] = {"detail": detail, "ts": time.time()}
+    return detail
+
+
+def _proxy_error_detail_uncached(token: str) -> str:
     if not token:
         return "No Google token in your session — please sign in again."
     try:
         r = requests.post(
-            f"{pw_access.PROXY_BASE_URL}/api/allowlist",
+            f"{pw_access.proxy_base_url()}/api/allowlist",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"app": APP_NAME},
             timeout=15,
@@ -393,21 +400,6 @@ __THEME_VARS__
         [data-testid="stFileChipDeleteBtn"] svg { color: var(--text-muted) !important; fill: var(--text-muted) !important; }
         [data-testid="stFileChipDeleteBtn"]:hover svg { color: var(--text) !important; fill: var(--text) !important; }
 
-        /* Selected files */
-        .selected-files { display: grid; gap: 0.55rem; margin: 0.9rem 0 0.4rem; }
-        .selected-file {
-            display: flex; align-items: center; gap: 0.85rem; padding: 0.8rem 0.9rem;
-            border: 1px solid var(--border); border-radius: var(--radius-sm);
-            background: var(--surface-alt); box-shadow: var(--shadow-sm);
-        }
-        .selected-file-icon {
-            display: grid; place-items: center; width: 2.6rem; height: 2.6rem; border-radius: 10px;
-            background: linear-gradient(180deg, var(--accent), var(--brand)); color: #ffffff;
-            font-weight: 800; font-size: 0.7rem; letter-spacing: 0.03em; flex: 0 0 auto;
-        }
-        .selected-file-name { color: var(--text); font-weight: 700; overflow-wrap: anywhere; }
-        .selected-file-size { margin-top: 0.15rem; color: var(--text-muted); font-size: 0.8rem; }
-
         /* Alerts + expander + status + progress */
         [data-testid="stExpander"] {
             background: var(--surface); border: 1px solid var(--border) !important;
@@ -550,7 +542,6 @@ if "ui_theme" not in st.session_state:
 _require_allowed_google_user()
 _render_global_styles()
 user_email = _current_user_email()
-user_initial = (user_email[:1] or "U").upper()
 logo_html = ""
 if LOGO_PATH.exists():
     logo_data = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
@@ -564,6 +555,7 @@ with st.sidebar:
     st.caption(_current_user_email())
     if st.button("Sign out", key="sidebar_sign_out", use_container_width=True):
         _logout_user()
+    st.caption(f"Build {APP_VERSION}")
 
 st.markdown(
     f"""
@@ -583,25 +575,19 @@ st.markdown(
 # ---- Fixed configuration --------------------------------------------------
 MODE = "summary"
 # Subject + notes language are chosen by the user in the upload panel below.
-SUBJECT_OPTIONS = {
-    "Auto-detect": "auto",
-    "Biology": "biology",
-    "Physics": "physics",
-    "Chemistry": "chemistry",
-    "Mathematics": "mathematics",
-}
+# Derived from config.SUBJECTS so the UI, CLI, and prompt templates always
+# offer the same subject list.
+SUBJECT_OPTIONS = {s.capitalize(): s for s in SUBJECTS}
 LANGUAGE_OPTIONS = ["English", "Hindi"]
 SEND_IMAGES = True
 STRICT_FILTER = True
 DTP_POLICY = "hide_note_insert_image"
 IMAGE_MODE = "smart_crop"
 AI_REDRAW = True
-IMAGE_MODEL = "gemini-2.5-flash-image"
+IMAGE_MODEL = DEFAULT_IMAGE_MODEL   # honours the IMAGE_MODEL_NAME env var
 
 if "results" not in st.session_state:
     st.session_state.results = []
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
 
 
 def _result_to_dict(name: str, result) -> dict:
@@ -616,7 +602,6 @@ def _result_to_dict(name: str, result) -> dict:
         "zip": str(result.zip_path) if result.zip_path else None,
         "notes": notes,
         "warnings": list(result.warnings or []),
-        "tracking": None,
         "error": None,
     }
 
@@ -639,48 +624,19 @@ def _notes_to_markdown(notes: str) -> str:
         leading = len(raw) - len(raw.lstrip(" \t"))
         level = min(3, leading // 4)
         content = line.strip()
+        # Check DTP notes FIRST (mirroring the DOCX writer): the model sometimes
+        # emits them as bullets, and a bullet-shaped DTP note must stay hidden
+        # in the preview just like it is in the document.
+        if "note to dtp" in content.lower():
+            continue
         bullet_m = re.match(r"^(\*|•|·|-|–)\s+(.*)$", content)
         if bullet_m:
             out.append("  " * level + "- " + _normalize_math(bullet_m.group(2).strip()))
         elif content[0].isdigit() and content[1:2] in {".", ")"}:
             out.append("  " * level + _normalize_math(content))
-        elif "note to dtp" in content.lower():
-            continue  # hidden in output, so hide in preview too
         else:
             out.append(_normalize_math(content))
     return "\n".join(out)
-
-
-def _format_file_size(size: int) -> str:
-    units = ["B", "KB", "MB", "GB"]
-    value = float(size)
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
-        value /= 1024
-    return f"{size} B"
-
-
-def _render_selected_files(files) -> None:
-    if not files:
-        return
-    rows = []
-    for uploaded in files:
-        name = html.escape(uploaded.name)
-        size = html.escape(_format_file_size(uploaded.size))
-        suffix = html.escape(Path(uploaded.name).suffix.replace(".", "").upper() or "FILE")
-        rows.append(
-            f"""
-            <div class="selected-file">
-                <div class="selected-file-icon">{suffix[:4]}</div>
-                <div>
-                    <div class="selected-file-name">{name}</div>
-                    <div class="selected-file-size">{size}</div>
-                </div>
-            </div>
-            """
-        )
-    st.markdown('<div class="selected-files">' + "".join(rows) + "</div>", unsafe_allow_html=True)
 
 
 with st.container(border=True):
@@ -696,15 +652,16 @@ with st.container(border=True):
         type=["pdf", "pptx", "ppt"],
         accept_multiple_files=True,
         label_visibility="collapsed",
-        key=f"lecture_files_{st.session_state.uploader_key}",
+        key="lecture_files",
     )
     opt_col1, opt_col2 = st.columns(2)
     with opt_col1:
         subject_label = st.selectbox(
             "Subject",
             list(SUBJECT_OPTIONS.keys()),
-            index=0,
-            help="Pick the subject, or let the app detect it from the file.",
+            index=None,
+            placeholder="Select subject…",
+            help="Pick the lecture's subject (required).",
         )
     with opt_col2:
         language_label = st.selectbox(
@@ -713,15 +670,21 @@ with st.container(border=True):
             index=0,
             help="The language the generated notes should be written in.",
         )
-    SUBJECT = SUBJECT_OPTIONS[subject_label]
+    SUBJECT = SUBJECT_OPTIONS.get(subject_label) if subject_label else None
     LANGUAGE = language_label
-    run_button = st.button("Generate Concise Notes", type="primary", disabled=not uploaded_files, use_container_width=True)
+    if uploaded_files and not SUBJECT:
+        st.caption("Select a subject to enable generation.")
+    run_button = st.button(
+        "Generate Concise Notes",
+        type="primary",
+        disabled=not uploaded_files or not SUBJECT,
+        use_container_width=True,
+    )
 
 if run_button and uploaded_files:
     google_token = _google_proxy_token()
-    # If the Google token has expired since login, re-auth before doing anything.
-    if _google_token_expired():
-        _reauth_screen("Your Google sign-in has expired. Please sign in again, then generate.")
+    # (Token freshness was already gated at the top of this script run; the
+    # per-file check inside the batch loop below covers expiry DURING a batch.)
     # Re-check authorization at generate time as defense-in-depth (login already
     # gated on this). The PW proxy Whitelisted sheet is the single source of
     # truth; uses the cached result to avoid an extra proxy round-trip.
@@ -748,6 +711,15 @@ if run_button and uploaded_files:
             progress = st.progress(0.0, text="Starting…")
             with tempfile.TemporaryDirectory() as tmpdir:
                 for i, uploaded in enumerate(uploaded_files, start=1):
+                    # Long batches can outlive the ~1h Google token. Stop cleanly
+                    # with the finished files intact instead of a cryptic 401.
+                    if _google_token_expired():
+                        st.warning(
+                            "Your Google sign-in expired during this batch. "
+                            f"{i - 1} of {total} file(s) finished. Sign in again "
+                            "and generate the remaining files."
+                        )
+                        break
                     status.update(label=f"Processing {i} of {total} — {uploaded.name}")
                     progress.progress((i - 1) / total, text=f"[{i}/{total}] {uploaded.name}")
                     st.write(f"⏳ Reading pages and generating notes for **{uploaded.name}**…")
@@ -762,14 +734,14 @@ if run_button and uploaded_files:
                             ai_redraw_diagrams=AI_REDRAW, image_model=IMAGE_MODEL,
                         )
                         result_dict = _result_to_dict(uploaded.name, result)
-                        result_dict["tracking"] = _usage_tracking_label(result)
+                        result_dict["usage_logged"] = _usage_logged(result)
                         st.session_state.results.append(result_dict)
                         st.write(f"✅ Finished **{uploaded.name}**")
                     except GeminiError as e:
-                        st.session_state.results.append({"name": uploaded.name, "error": f"Gemini API failed: {e}", "notes": "", "run_dir": None, "tracking": None})
+                        st.session_state.results.append({"name": uploaded.name, "error": f"Gemini API failed: {e}", "notes": "", "run_dir": None})
                         st.write(f"❌ Failed **{uploaded.name}**")
                     except Exception as e:
-                        st.session_state.results.append({"name": uploaded.name, "error": f"Processing failed: {e}", "notes": "", "run_dir": None, "tracking": None})
+                        st.session_state.results.append({"name": uploaded.name, "error": f"Processing failed: {e}", "notes": "", "run_dir": None})
                         st.write(f"❌ Failed **{uploaded.name}**")
                     progress.progress(i / total, text=f"[{i}/{total}] {uploaded.name}")
             ok = sum(1 for r in st.session_state.results if not r.get("error"))
@@ -790,12 +762,10 @@ if results:
             if r.get("error"):
                 st.error(r["error"])
                 continue
-            if r.get("tracking"):
-                tracking = str(r["tracking"])
-                if "not updated" in tracking.lower() or "failed" in tracking.lower():
-                    st.warning(f"Usage logging failed on the PW proxy: {tracking}")
-                else:
-                    st.caption(f"Usage tracked via {tracking}.")
+            if r.get("usage_logged") is True:
+                st.caption("Usage tracked in the PW Usage Cost sheet.")
+            elif r.get("usage_logged") is False:
+                st.warning("Usage logging failed on the PW proxy — this run was not recorded in the Usage Cost sheet.")
             for warning in r.get("warnings") or []:
                 st.warning(str(warning))
             c1, c2, c3 = st.columns(3)

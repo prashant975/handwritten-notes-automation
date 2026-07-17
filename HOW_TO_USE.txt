@@ -63,12 +63,10 @@ SIGN IN
 GENERATE NOTES
 --------------
 1. Upload one or more files (PDF, PPTX, or PPT).
-2. Choose the SUBJECT (Auto-detect, Biology, Physics, or Chemistry) and
-   the NOTES LANGUAGE (English or Hindi).
+2. Choose the SUBJECT (Biology, Physics, Chemistry, or Mathematics) and
+   the NOTES LANGUAGE (English or Hindi). Both are required.
    - For a Hindi lecture, select "Hindi" here or the notes come out in
      English.
-   - Use a specific subject instead of "Auto-detect" if the automatic
-     guess is ever wrong.
 3. Click "Generate Concise Notes" and wait. Large files can take a
    few minutes.
 4. For each file you can download:

@@ -55,8 +55,13 @@ def main():
                 if s.startswith("#") or "=" not in s:
                     continue
                 name, _, val = s.partition("=")
-                if val.strip() and any(k in name.upper()
-                                       for k in ("GEMINI", "MATHPIX", "SARVAM", "OPENAI")):
+                upper = name.upper()
+                # A leaked credential names a provider AND looks like a secret
+                # (KEY/SECRET/TOKEN). Plain config like MODEL_NAME or the legacy
+                # GEMINI_MODEL model-picker must not be flagged.
+                if (val.strip()
+                        and any(p in upper for p in ("GEMINI", "MATHPIX", "SARVAM", "OPENAI"))
+                        and any(s_ in upper for s_ in ("KEY", "SECRET", "TOKEN"))):
                     leaked.append(name.strip())
     if leaked:
         print(f"FAIL: provider keys still present in {env_path}: {leaked}")

@@ -9,7 +9,6 @@ class DtpNote:
     raw: str
     slide_no: int | None = None
     heading: str | None = None
-    labels: list[str] | None = None
 
 
 # Greedy up to the last ')' on the same line so labels containing their own
@@ -17,7 +16,6 @@ class DtpNote:
 DTP_RE = re.compile(r"\(\s*Note\s+to\s+DTP\s*:.*\)", re.I)
 SLIDE_RE = re.compile(r"(?:slide\s*(?:no\.?|#)?|from\s+slide)\s*[:\-]?\s*(\d+)", re.I)
 HEADING_RE = re.compile(r"under\s+the\s+heading\s+[\"“']([^\"”']+)[\"”']", re.I)
-LABEL_RE = re.compile(r"[\"“']([^\"”']+)[\"”']")
 
 
 def parse_dtp_note(text: str) -> DtpNote | None:
@@ -34,8 +32,7 @@ def parse_dtp_note(text: str) -> DtpNote | None:
     hm = HEADING_RE.search(text)
     if hm:
         heading = hm.group(1).strip()
-    labels = LABEL_RE.findall(text)
-    return DtpNote(raw=text, slide_no=slide_no, heading=heading, labels=labels)
+    return DtpNote(raw=text, slide_no=slide_no, heading=heading)
 
 
 def find_dtp_notes(text: str) -> list[DtpNote]:

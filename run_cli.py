@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from src.config import DEFAULT_MODEL, SUPPORTED_EXTENSIONS
+from src.config import DEFAULT_IMAGE_MODEL, DEFAULT_MODEL, MODES, SUBJECTS, SUPPORTED_EXTENSIONS
 from src.pipeline import run_batch, run_pipeline
 
 
@@ -19,16 +19,16 @@ def _collect_inputs(input_path: Path) -> list[Path]:
 def main():
     parser = argparse.ArgumentParser(description="Generate handwritten-style lecture notes from PPT/PDF.")
     parser.add_argument("--input", required=True, help="Path to a lecture PDF/PPTX/PPT, or a folder of them (batch mode)")
-    parser.add_argument("--subject", default="auto", choices=["auto", "biology", "physics", "chemistry", "mathematics"], help="Subject, or 'auto' to detect it from the file (default: auto)")
+    parser.add_argument("--subject", required=True, choices=["auto"] + SUBJECTS, help="Lecture subject (required, matching the UI policy). 'auto' keyword-detects from the file — best effort; the detected subject is reported in the run warnings.")
     parser.add_argument("--language", default="English", choices=["English", "Hindi", "en", "hi"])
-    parser.add_argument("--mode", default="summary", choices=["summary", "complete"])
+    parser.add_argument("--mode", default="summary", choices=MODES)
     parser.add_argument("--google-token", default=os.getenv("PW_GOOGLE_TOKEN", ""), help="Signed-in @pw.live Google access/id token (or set PW_GOOGLE_TOKEN). Required unless --allow-mock is used; the PW proxy holds the Gemini key.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--no-images", action="store_true", help="Do not send rendered slide images to AI")
     parser.add_argument("--no-strict-filter", action="store_true")
     parser.add_argument("--allow-mock", action="store_true")
     parser.add_argument("--ai-redraw-diagrams", action="store_true", help="AI-redraw inserted diagrams in handwritten blue-on-white style (extra API quota)")
-    parser.add_argument("--image-model", default="gemini-2.5-flash-image", help="Gemini image model for diagram redraw")
+    parser.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL, help="Gemini image model for diagram redraw (honours IMAGE_MODEL_NAME env var)")
     parser.add_argument("--dtp-note-policy", default="hide_note_insert_image", choices=["hide_note_insert_image", "keep_note_and_insert_image", "keep_note_only"], help="hide_note_insert_image removes the yellow DTP note and inserts only the image")
     args = parser.parse_args()
     inputs = _collect_inputs(Path(args.input))

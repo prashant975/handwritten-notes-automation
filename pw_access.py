@@ -32,9 +32,17 @@ import requests
 APP_NAME = "Handwritten Notes Automation"
 
 # Point this at your proxy. Override per-environment with PW_PROXY_BASE_URL.
-PROXY_BASE_URL = os.environ.get(
-    "PW_PROXY_BASE_URL", "https://pw-apps-proxy.vercel.app"
-).rstrip("/")
+def proxy_base_url() -> str:
+    """Resolve the proxy base URL at CALL time, so a PW_PROXY_BASE_URL set by
+    a late load_dotenv (src.config imports after pw_access in some entrypoints)
+    is still honoured instead of being silently ignored."""
+    return os.environ.get(
+        "PW_PROXY_BASE_URL", "https://pw-apps-proxy.vercel.app"
+    ).rstrip("/")
+
+
+# Import-time snapshot kept for backward compatibility (scripts print it).
+PROXY_BASE_URL = proxy_base_url()
 
 _TIMEOUT = 30       # allowlist / logging — fast
 _AI_TIMEOUT = 300   # Gemini / Mathpix — can be slow
@@ -69,7 +77,7 @@ def check_allowed_status(google_token: str, app: str = APP_NAME) -> str:
         return "denied"
     try:
         r = requests.post(
-            f"{PROXY_BASE_URL}/api/allowlist",
+            f"{proxy_base_url()}/api/allowlist",
             headers=_headers(google_token),
             json={"app": app},
             timeout=_TIMEOUT,
@@ -103,7 +111,7 @@ def log_usage(
     """
     try:
         r = requests.post(
-            f"{PROXY_BASE_URL}/api/usage-log",
+            f"{proxy_base_url()}/api/usage-log",
             headers=_headers(google_token),
             json={
                 "app": app,
@@ -201,7 +209,7 @@ def _get_vertex(google_token, app=APP_NAME):
         if _vertex_cache["token"] and now < _vertex_cache["expiry"] - 600:
             return _vertex_cache
         r = requests.post(
-            f"{PROXY_BASE_URL}/api/vertex/token",
+            f"{proxy_base_url()}/api/vertex/token",
             headers=_headers(google_token),
             json={"app": app},
             timeout=_TIMEOUT,
@@ -281,7 +289,7 @@ def mathpix_ocr(
     if session is not None:
         payload["log"] = False
     r = requests.post(
-        f"{PROXY_BASE_URL}/api/mathpix/ocr",
+        f"{proxy_base_url()}/api/mathpix/ocr",
         headers=_headers(google_token),
         json=payload,
         timeout=_AI_TIMEOUT,
@@ -313,7 +321,7 @@ def sarvam_tts(
     if session is not None:
         payload["log"] = False
     r = requests.post(
-        f"{PROXY_BASE_URL}/api/sarvam/tts",
+        f"{proxy_base_url()}/api/sarvam/tts",
         headers=_headers(google_token),
         json=payload,
         timeout=_AI_TIMEOUT,

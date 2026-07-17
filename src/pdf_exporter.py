@@ -39,6 +39,8 @@ def _export_with_word(docx_path: Path, output_dir: Path) -> tuple[Path | None, s
     except Exception as e:
         return None, f"pywin32 is not installed or Word COM is unavailable: {e}"
     pdf_path = output_dir / f"{docx_path.stem}.pdf"
+    word = None
+    doc = None
     try:
         pythoncom.CoInitialize()
         word = win32com.client.DispatchEx("Word.Application")
@@ -46,13 +48,28 @@ def _export_with_word(docx_path: Path, output_dir: Path) -> tuple[Path | None, s
         word.DisplayAlerts = 0
         doc = word.Documents.Open(str(docx_path.resolve()))
         doc.SaveAs(str(pdf_path.resolve()), FileFormat=17)
-        doc.Close(False)
-        word.Quit()
         if pdf_path.exists():
             return pdf_path, None
         return None, "Microsoft Word ran but did not create a PDF."
     except Exception as e:
         return None, f"Microsoft Word PDF export failed: {e}"
+    finally:
+        # Always close/quit, even when Open or SaveAs raised — otherwise every
+        # failed export leaks an invisible WINWORD.EXE holding the docx open.
+        try:
+            if doc is not None:
+                doc.Close(False)
+        except Exception:
+            pass
+        try:
+            if word is not None:
+                word.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
 
 def export_docx_to_pdf(docx_path: Path, output_dir: Path) -> tuple[Path | None, str | None]:

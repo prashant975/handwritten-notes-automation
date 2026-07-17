@@ -1,4 +1,4 @@
-"""Automatically pick the subject (biology / physics / chemistry) for a lecture.
+"""Automatically pick the subject (biology / physics / chemistry / mathematics) for a lecture.
 
 The uploaded file name is the strongest signal for PW lectures (it usually names
 the exact chapter), so it is weighted far above the slide text. Matching is done
@@ -106,32 +106,39 @@ def _count_phrases(text: str, phrases: list[str]) -> int:
     return sum(text.count(p) for p in phrases)
 
 
-def _count_stems(text: str, stems: list[str]) -> int:
+def _count_stems(text: str, stems: list[str], *, distinct: bool = False) -> int:
+    if distinct:
+        return sum(1 for s in stems if re.search(r"\b" + re.escape(s), text))
     return sum(len(re.findall(r"\b" + re.escape(s), text)) for s in stems)
 
 
-def _count_words(text: str, words: list[str]) -> int:
+def _count_words(text: str, words: list[str], *, distinct: bool = False) -> int:
+    if distinct:
+        return sum(1 for w in words if re.search(r"\b" + re.escape(w) + r"\b", text))
     return sum(len(re.findall(r"\b" + re.escape(w) + r"\b", text)) for w in words)
 
 
-def _score(text: str, subject: str, weights: dict) -> int:
+def _score(text: str, subject: str, weights: dict, *, distinct: bool = False) -> int:
     return (
         _count_phrases(text, SUBJECT_PHRASES[subject]) * weights["phrase"]
-        + _count_stems(text, SUBJECT_STEMS[subject]) * weights["stem"]
-        + _count_words(text, SUBJECT_WORDS[subject]) * weights["word"]
+        + _count_stems(text, SUBJECT_STEMS[subject], distinct=distinct) * weights["stem"]
+        + _count_words(text, SUBJECT_WORDS[subject], distinct=distinct) * weights["word"]
     )
 
 
 def detect_subject(filename: str = "", slide_text: str = "", default: str = "biology") -> str:
-    """Return 'biology' | 'physics' | 'chemistry'.
+    """Return 'biology' | 'physics' | 'chemistry' | 'mathematics'.
 
-    File name dominates (weighted phrases/stems/words), with the slide text as a
-    lower-weighted tie-breaker. Falls back to `default` only when nothing matches.
+    File name dominates (weighted phrases/stems/words). Slide text is only a
+    tie-breaker: its stems/words count each DISTINCT term once (presence, not
+    occurrences), so a physics deck that mentions sin/cos/theta on every slide
+    cannot out-vote its own file name through sheer volume. Falls back to
+    `default` only when nothing matches at all.
     """
     name = re.sub(r"[_\-]+", " ", (filename or "").lower())
     body = (slide_text or "").lower()
     scores = {
-        subj: _score(name, subj, _WEIGHTS) + _score(body, subj, _BODY_WEIGHTS)
+        subj: _score(name, subj, _WEIGHTS) + _score(body, subj, _BODY_WEIGHTS, distinct=True)
         for subj in ("physics", "chemistry", "biology", "mathematics")
     }
     best = max(scores, key=scores.get)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +12,8 @@ from typing import Any
 import pw_access
 
 from .utils import image_mime_type
+
+logger = logging.getLogger("concise_notes.gemini")
 
 
 class GeminiError(RuntimeError):
@@ -27,6 +31,7 @@ class GeminiResponse:
     model: str
     raw: dict[str, Any] | None = None
     usage: dict[str, int] | None = None
+    images_dropped: int = 0   # slide images omitted to fit the request budget
 
 
 def _usage_from_mapping(data: dict[str, Any] | None) -> dict[str, int]:
@@ -65,6 +70,62 @@ def _usage_from_proxy(resp: dict[str, Any] | None) -> dict[str, int]:
     if isinstance(usage.get("tokens_out"), int):
         out["tokens_output"] = usage["tokens_out"]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Retry policy (shared by every Gemini call via GeminiClient._generate_content)
+# ---------------------------------------------------------------------------
+_MAX_EMPTY_RETRIES = 3          # empty-but-"successful" responses: retry 1s, 2s, 4s
+_MAX_TRANSIENT_RETRIES = 3      # 429 / 5xx: same backoff
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+_STATUS_RE = re.compile(r"\berror (\d{3})\b")
+
+
+def _status_from_error(e: Exception) -> int | None:
+    """Extract the HTTP status from a PWAccessError message
+    ("vertex gemini error 429: ..." / "vertex token error 401: ...")."""
+    m = _STATUS_RE.search(str(e))
+    return int(m.group(1)) if m else None
+
+
+def _response_id(result: dict[str, Any] | None) -> str:
+    return str((result or {}).get("responseId") or "-")
+
+
+def _finish_reason(result: dict[str, Any] | None) -> str:
+    try:
+        return str((result or {}).get("candidates", [{}])[0].get("finishReason") or "-")
+    except (IndexError, AttributeError, TypeError):
+        return "-"
+
+
+def _response_is_empty(result: dict[str, Any] | None, *, expect: str = "text") -> bool:
+    """True when a structurally 'successful' Gemini response carries no output.
+
+    Covers every empty-response shape seen in production: result not a dict,
+    missing/empty candidates, candidate without content/parts, and parts whose
+    text is "" or whitespace. For expect="image", inline image data counts as
+    output instead (image responses legitimately have no text)."""
+    if not isinstance(result, dict):
+        return True
+    candidates = result.get("candidates")
+    if not candidates:
+        return True
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        parts = (cand.get("content") or {}).get("parts") or []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if expect == "image":
+                inline = p.get("inline_data") or p.get("inlineData")
+                if inline and inline.get("data"):
+                    return False
+            else:
+                if str(p.get("text") or "").strip():
+                    return False
+    return True
 
 
 def _extract_text_from_response(data: dict[str, Any]) -> str:
@@ -169,23 +230,41 @@ class GeminiClient:
         model: str = "gemini-2.5-pro",
         *,
         session: "pw_access.UsageSession | None" = None,
-        timeout: int = 300,
     ):
         self.google_token = (google_token or "").strip()
         self.model = model.strip() or "gemini-2.5-pro"
         self.session = session
-        self.timeout = timeout
         if not self.google_token:
             raise GeminiError(
                 "No Google token available. Sign in with your @pw.live Google "
                 "account before generating notes (the PW proxy needs it)."
             )
 
-    def _generate_content(self, model: str, body: dict[str, Any]) -> dict[str, Any]:
-        # Retry transient Vertex errors (rate limit / 5xx) with backoff. Usage is
-        # only accumulated on a 200 inside pw_access, so retries never double-log.
-        resp = None
-        for attempt in range(4):
+    def _generate_content(self, model: str, body: dict[str, Any], *, expect: str = "text") -> dict[str, Any]:
+        """Call Gemini with resilience against BOTH failure modes we see in prod:
+
+        1. Transient HTTP errors (429 rate limit, 5xx) -> retried with backoff.
+           Auth failures (401/403) and other 4xx are NOT retried.
+        2. "Successful" responses that contain no output — finishReason STOP but
+           text is "" / parts missing / candidates missing (an intermittent
+           model-side issue; the same prompt usually succeeds on a retry).
+           Retried up to _MAX_EMPTY_RETRIES times with exponential backoff
+           (1s, 2s, 4s). `expect` selects what counts as output: "text" for
+           note generation, "image" for diagram redraw (which returns
+           inline_data and NO text — it must not be misread as empty).
+
+        The first non-empty response is returned immediately. Every attempt is
+        logged with attempt number, response id, finish reason, and emptiness so
+        intermittent behaviour is visible in the logs. Usage note: Gemini bills
+        empty responses too, so their tokens still accumulate into the
+        UsageSession — retries are never double-logged beyond what Vertex
+        actually charged.
+        """
+        empty_retries = 0
+        transient_retries = 0
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 resp = pw_access.gemini_generate(
                     self.google_token,
@@ -193,30 +272,66 @@ class GeminiClient:
                     request=body,
                     session=self.session,
                 )
-                break
             except pw_access.PWAccessError as e:
-                transient = any(f" {code}" in str(e) for code in (429, 500, 502, 503, 504))
-                if transient and attempt < 3:
-                    time.sleep(1.5 * (attempt + 1))
+                status = _status_from_error(e)
+                if status in _TRANSIENT_STATUS and transient_retries < _MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    delay = float(2 ** (transient_retries - 1))
+                    logger.warning(
+                        "gemini transient error: attempt=%d status=%s retry=%d/%d delay=%.0fs err=%s",
+                        attempt, status, transient_retries, _MAX_TRANSIENT_RETRIES, delay, str(e)[:200],
+                    )
+                    time.sleep(delay)
                     continue
-                raise GeminiError(str(e), provider="pw_proxy") from e
-        result = resp.get("result")
-        if not isinstance(result, dict):
-            raise GeminiError(
-                f"Proxy returned no Gemini result. Response: {json.dumps(resp)[:600]}",
-                provider="pw_proxy",
-                details=resp,
+                # Auth (401/403), other 4xx, or transient retries exhausted: surface it.
+                logger.error("gemini call failed (no retry): attempt=%d status=%s err=%s",
+                             attempt, status, str(e)[:200])
+                raise GeminiError(str(e), provider="pw_proxy", status_code=status) from e
+
+            result = resp.get("result") if isinstance(resp, dict) else None
+            empty = _response_is_empty(result, expect=expect)
+            logger.info(
+                "gemini response: attempt=%d response_id=%s finish_reason=%s empty=%s",
+                attempt, _response_id(result), _finish_reason(result), empty,
             )
-        # Stash the proxy-level usage so callers can fall back to it.
-        result.setdefault("_pw_usage", resp.get("usage") or {})
-        return result
+            if not empty:
+                if empty_retries or transient_retries:
+                    logger.info(
+                        "gemini succeeded after retries: attempts=%d empty_retries=%d transient_retries=%d",
+                        attempt, empty_retries, transient_retries,
+                    )
+                # Stash the proxy-level usage so callers can fall back to it.
+                result.setdefault("_pw_usage", resp.get("usage") or {})
+                return result
+
+            if empty_retries < _MAX_EMPTY_RETRIES:
+                empty_retries += 1
+                delay = float(2 ** (empty_retries - 1))     # 1s, 2s, 4s
+                logger.warning(
+                    "gemini EMPTY response: attempt=%d response_id=%s finish_reason=%s "
+                    "retry=%d/%d delay=%.0fs",
+                    attempt, _response_id(result), _finish_reason(result),
+                    empty_retries, _MAX_EMPTY_RETRIES, delay,
+                )
+                time.sleep(delay)
+                continue
+
+            logger.error(
+                "gemini empty after all retries: attempts=%d response_id=%s finish_reason=%s",
+                attempt, _response_id(result), _finish_reason(result),
+            )
+            raise GeminiError(
+                f"Gemini returned an empty response after {_MAX_EMPTY_RETRIES} retry attempts.",
+                provider="pw_proxy",
+                details=result,
+            )
 
     def generate(self, prompt: str, image_paths: list[Path] | None = None, *, max_output_tokens: int = 12000, temperature: float = 0.15, max_images: int = 8) -> GeminiResponse:
         body = {
             "contents": [{"role": "user", "parts": _build_rest_parts(prompt, image_paths, max_images=max_images)}],
             "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens},
         }
-        _fit_body_to_budget(body)
+        dropped = _fit_body_to_budget(body)
         data = self._generate_content(self.model, body)
         text = _extract_text_from_response(data)
         if not text:
@@ -226,7 +341,8 @@ class GeminiClient:
                 details=data,
             )
         usage = _usage_from_mapping(data) or _usage_from_proxy({"usage": data.get("_pw_usage")})
-        return GeminiResponse(text=text, provider="pw_proxy", model=self.model, raw=data, usage=usage)
+        return GeminiResponse(text=text, provider="pw_proxy", model=self.model, raw=data,
+                              usage=usage, images_dropped=dropped)
 
     def test_connection(self) -> GeminiResponse:
         return self.generate("Reply with exactly: OK", image_paths=[], max_output_tokens=32, temperature=0.0, max_images=0)
@@ -239,7 +355,7 @@ class GeminiClient:
             "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
         }
         _fit_body_to_budget(body)
-        data = self._generate_content(image_model, body)
+        data = self._generate_content(image_model, body, expect="image")
         for cand in data.get("candidates") or []:
             for part in (cand.get("content") or {}).get("parts") or []:
                 inline = part.get("inline_data") or part.get("inlineData")

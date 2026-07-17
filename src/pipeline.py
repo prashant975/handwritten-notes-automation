@@ -82,9 +82,9 @@ def run_pipeline(
             raise RuntimeError("No slides/pages left after filtering. Disable strict filtering and try again.")
         language_code = LANGUAGE_CODES.get(language, language).lower()
         if batch_size is None or batch_size <= 0:
-            # Keep image batches small: each page image is sent inline through the
-            # Vercel proxy, which caps request bodies at ~4.5 MB. Images are also
-            # compressed in ai_client, but a small batch keeps a safety margin.
+            # Small image batches keep each Vertex request lean (ai_client
+            # downscales pages to JPEG under an 18 MB budget) and keep the
+            # model's attention per page high; text-only chunks can be larger.
             batch_size = 4 if send_images_to_ai else 18
         partial_notes: list[str] = []
         api_metadata: list[dict] = []
@@ -121,18 +121,31 @@ def run_pipeline(
             chunk_results: dict[int, object] = {}
             with ThreadPoolExecutor(max_workers=min(4, max(1, len(chunks)))) as ex:
                 futures = [ex.submit(_run_chunk, i, ch) for i, ch in enumerate(chunks, start=1)]
-                for fut in as_completed(futures):
-                    try:
-                        i, resp = fut.result()
-                    except GeminiError:
-                        raise
-                    except Exception as e:
-                        raise GeminiError(f"Gemini generation failed: {e}") from e
-                    chunk_results[i] = resp
+                try:
+                    for fut in as_completed(futures):
+                        try:
+                            i, resp = fut.result()
+                        except GeminiError:
+                            raise
+                        except Exception as e:
+                            raise GeminiError(f"Gemini generation failed: {e}") from e
+                        chunk_results[i] = resp
+                except BaseException:
+                    # One chunk failed terminally — abandon the queued chunks so
+                    # they don't keep calling (and billing) Gemini pointlessly.
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise
+            images_dropped = 0
             for i in sorted(chunk_results):
                 resp = chunk_results[i]
                 partial_notes.append(resp.text)
+                images_dropped += getattr(resp, "images_dropped", 0)
                 api_metadata.append(_api_call_metadata(resp, chunk=i))
+            if images_dropped:
+                warnings.append(
+                    f"{images_dropped} slide image(s) were omitted from AI calls to fit "
+                    "the request size limit; those pages were processed from text only."
+                )
             if len(partial_notes) == 1:
                 notes_text = partial_notes[0]
             else:

@@ -15,6 +15,18 @@ def make_run_id(prefix: str = "run") -> str:
     return f"{prefix}_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
+# Longest stem we allow in generated file names. The full output path is
+# RUNS_DIR/run_<ts>_<uuid8>/output/<stem>_Concise_Notes.docx — with a typical
+# install prefix that fixed part is already ~130-150 chars, and Windows (and
+# Word COM's Documents.Open) cap paths at ~260. 80 chars of stem keeps every
+# real path comfortably inside the limit.
+_MAX_STEM_LEN = 80
+
+
+def _cap_stem(name: str) -> str:
+    return name[:_MAX_STEM_LEN].rstrip(" ._-") if len(name) > _MAX_STEM_LEN else name
+
+
 def safe_name(name: str, default: str = "file") -> str:
     # Unicode-aware: keep letters/digits of ANY script plus their combining
     # marks — \w covers Devanagari consonants, and the extra ranges keep the
@@ -22,17 +34,19 @@ def safe_name(name: str, default: str = "file") -> str:
     # file name survives intact instead of collapsing to "_". Only true
     # separators/punctuation become "_"; "." and "-" are kept.
     name = re.sub(r"[^\w.\-̀-ͯऀ-ॿ]+", "_", name, flags=re.UNICODE).strip("._")
-    return name or default
+    return _cap_stem(name) or default
 
 
 def preserve_filename(name: str, default: str = "file") -> str:
     """Keep the uploaded file's name EXACTLY for the output file — spaces, case,
     Unicode (Hindi), dots and dashes are all preserved. Only strips the handful
     of characters that are illegal in a Windows/most filesystem file name
-    (<>:"/\\|?*), collapses runs of whitespace, and trims trailing dots/spaces."""
+    (<>:"/\\|?*), collapses runs of whitespace, trims trailing dots/spaces, and
+    caps very long names so the full output path stays under Windows' ~260-char
+    limit (long names otherwise kill the run AFTER the Gemini calls are billed)."""
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", name)
     name = re.sub(r"\s+", " ", name).strip().strip(". ")
-    return name or default
+    return _cap_stem(name) or default
 
 
 def ensure_dir(path: Path) -> Path:

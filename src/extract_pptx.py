@@ -80,14 +80,14 @@ def _render_ppt_with_powerpoint(ppt_path: Path, run_dir: Path) -> dict[int, Path
     except Exception:
         return {}
     out_dir = ensure_dir(run_dir / "rendered")
+    app = None
+    pres = None
     try:
         pythoncom.CoInitialize()
         app = win32com.client.DispatchEx("PowerPoint.Application")
         app.Visible = 1
         pres = app.Presentations.Open(str(ppt_path.resolve()), WithWindow=False)
         pres.Export(str(out_dir.resolve()), "PNG", 1920, 1080)
-        pres.Close()
-        app.Quit()
         mapping: dict[int, Path] = {}
         for p in out_dir.glob("Slide*.PNG"):
             num = "".join(ch for ch in p.stem if ch.isdigit())
@@ -100,6 +100,22 @@ def _render_ppt_with_powerpoint(ppt_path: Path, run_dir: Path) -> dict[int, Path
         return mapping
     except Exception:
         return {}
+    finally:
+        # Always close/quit so a failed export can't leak a hidden POWERPNT.EXE.
+        try:
+            if pres is not None:
+                pres.Close()
+        except Exception:
+            pass
+        try:
+            if app is not None:
+                app.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
 
 def _convert_ppt_to_pptx(ppt_path: Path, run_dir: Path) -> Path | None:
@@ -107,6 +123,8 @@ def _convert_ppt_to_pptx(ppt_path: Path, run_dir: Path) -> Path | None:
     Tries PowerPoint COM SaveAs, then LibreOffice. Returns the .pptx or None."""
     out_dir = ensure_dir(run_dir / "converted")
     if sys.platform == "win32":
+        app = None
+        pres = None
         try:
             import pythoncom
             import win32com.client
@@ -116,12 +134,26 @@ def _convert_ppt_to_pptx(ppt_path: Path, run_dir: Path) -> Path | None:
             pres = app.Presentations.Open(str(ppt_path.resolve()), WithWindow=False)
             out = out_dir / (ppt_path.stem + ".pptx")
             pres.SaveAs(str(out.resolve()), 24)   # 24 = ppSaveAsOpenXMLPresentation
-            pres.Close()
-            app.Quit()
             if out.exists():
                 return out
         except Exception:
             pass
+        finally:
+            try:
+                if pres is not None:
+                    pres.Close()
+            except Exception:
+                pass
+            try:
+                if app is not None:
+                    app.Quit()
+            except Exception:
+                pass
+            try:
+                import pythoncom as _pc
+                _pc.CoUninitialize()
+            except Exception:
+                pass
     soffice = _find_soffice()
     if soffice:
         try:

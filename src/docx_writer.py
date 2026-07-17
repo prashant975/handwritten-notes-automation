@@ -94,7 +94,8 @@ _GREEK_RE = re.compile(r"\b(" + "|".join(_GREEK) + r")\b", re.I)
 # turned into a symbol when it touches one of these — so science prose like
 # "alpha particle", "beta decay", "gamma rays", "sigma bond" or "pi bond"
 # keeps its English words instead of becoming α/β/γ/σ/π.
-_MATH_NEIGHBOUR = set("=+-*/^_()[]{}×·√±≤≥<>∫∑∏°|⇒→∝≈≡0123456789")
+_MATH_NEIGHBOUR = set("=+-*/^_()[]{}×·√±≤≥<>∫∑∏°|⇒→∝≈≡0123456789"
+                      "∈∉∋⊂⊆⊃⊇∪∩∖∅∀∃∄⇐⇔↔↦∴∵∣⟨⟩∮∂∇⊥∠∥←")
 
 
 def _greek_sub(m):
@@ -119,7 +120,7 @@ _LATEX_SYMBOLS = {
     "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
     "approx": "≈", "equiv": "≡", "propto": "∝", "infty": "∞", "cong": "≅",
     "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒",
-    "leftrightarrow": "↔", "implies": "⇒", "iff": "⇔",
+    "leftrightarrow": "↔", "Leftrightarrow": "⇔", "implies": "⇒", "iff": "⇔",
     "sum": "Σ", "prod": "Π", "int": "∫", "oint": "∮", "partial": "∂", "nabla": "∇",
     "degree": "°", "circ": "°", "angle": "∠", "perp": "⊥", "parallel": "∥",
     "therefore": "∴", "because": "∵", "sqrt": "√", "cdots": "⋯", "ldots": "…",
@@ -128,8 +129,8 @@ _LATEX_SYMBOLS = {
     "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂", "subseteq": "⊆",
     "supset": "⊃", "supseteq": "⊇", "cup": "∪", "cap": "∩", "setminus": "∖",
     "emptyset": "∅", "varnothing": "∅", "forall": "∀", "exists": "∃",
-    "nexists": "∄", "Leftrightarrow": "⇔", "Leftarrow": "⇐", "mapsto": "↦",
-    "leftrightarrow": "↔", "langle": "⟨", "rangle": "⟩",
+    "nexists": "∄", "Leftarrow": "⇐", "mapsto": "↦",
+    "langle": "⟨", "rangle": "⟩",
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "Delta": "Δ",
     "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ",
     "vartheta": "θ", "Theta": "Θ", "iota": "ι", "kappa": "κ", "lambda": "λ",
@@ -215,7 +216,10 @@ def _normalize_math(text: str) -> str:
     text = re.sub(r"`([^`]*)`", r"\1", text)          # `v_AB` code ticks
     text = _DISPLAY_MATH_RE.sub(_unwrap_display, text)
     text = _INLINE_DOLLAR_RE.sub(_unwrap_inline_dollar, text)
-    text = re.sub(r"\\left\s*|\\right\s*", "", text)
+    # Strip ONLY the bare \left / \right delimiter commands — the negative
+    # lookahead keeps \rightarrow, \leftarrow, \leftrightarrow intact for the
+    # symbol table below (without it, "\rightarrow" became the word "arrow").
+    text = re.sub(r"\\left(?![A-Za-z])\s*|\\right(?![A-Za-z])\s*", "", text)
     text = re.sub(r"\\[,;:!> ]", " ", text)
     # Structural LaTeX, innermost-first (a few passes handles simple nesting).
     for _ in range(4):
@@ -316,7 +320,13 @@ def _is_bullet(line: str) -> bool:
     return bool(re.match(r"^\s*\d+[.)]\s+", line))
 
 
-_FORMULA_HINT_RE = re.compile(r"[=√×÷≤≥≠±∝∫∑]|[A-Za-z0-9]\^|[A-Za-z0-9]_[A-Za-z0-9{]|\\[A-Za-z]+|\$")
+# Covers both ASCII/LaTeX notation AND the Unicode symbols this writer itself
+# produces (set/logic/arrows), so a standalone equation line like "x ∈ A ∪ B"
+# or "A → B" is never styled as a green heading.
+_FORMULA_HINT_RE = re.compile(
+    r"[=√×÷≤≥≠±∝∫∑∈∉∋⊂⊆⊃⊇∪∩∖∅∀∃∄→←⇒⇐⇔↔↦∴∵∮∂∇⊥∠∥⟨⟩]"
+    r"|[A-Za-z0-9]\^|[A-Za-z0-9]_[A-Za-z0-9{]|\\[A-Za-z]+|\$"
+)
 
 
 def _looks_like_formula(s: str) -> bool:
@@ -399,7 +409,7 @@ def _has_alpha(image_path: Path) -> bool:
         return False
 
 
-def _pick_dtp_image(note, slide, run_dir: Path, region_cache: dict, used: dict):
+def _pick_dtp_image(slide, run_dir: Path, region_cache: dict, used: dict):
     """Choose which image this DTP note should get.
 
     A slide often holds several diagrams and several notes point at the same
@@ -499,7 +509,7 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
             if dtp_note_policy in {"keep_note_and_insert_image", "hide_note_insert_image"}:
                 if note and note.slide_no and note.slide_no in slide_map and slide_map[note.slide_no].image_path:
                     img, cropped = _pick_dtp_image(
-                        note, slide_map[note.slide_no], run_dir, region_cache, used_regions
+                        slide_map[note.slide_no], run_dir, region_cache, used_regions
                     )
                     if img is None:
                         warnings.append(
