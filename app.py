@@ -8,6 +8,7 @@ import html
 import time
 from pathlib import Path
 
+import requests
 import streamlit as st
 
 import pw_access
@@ -119,6 +120,57 @@ def _auth_session_expired() -> bool:
         return False
 
     return issued_at > 0 and time.time() - issued_at >= SESSION_TIMEOUT_SECONDS
+
+
+def _google_token_expired() -> bool:
+    """True once the signed-in user's Google token has expired.
+
+    Streamlit keeps the login cookie for the full 7-day session but does NOT
+    refresh the underlying Google id_token, which lives ~1 hour. Past its `exp`
+    the PW proxy rejects it with 401 ("invalid or expired token"), so we must
+    re-authenticate rather than keep sending a dead token."""
+    try:
+        exp = int(st.user.get("exp", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    # 60s skew so we re-auth just before the proxy would start rejecting.
+    return exp > 0 and time.time() >= (exp - 60)
+
+
+def _proxy_error_detail(token: str) -> str:
+    """One extra allowlist call (only on the error screen) to surface WHY the
+    proxy couldn't verify access, so a stuck user can report/understand it."""
+    if not token:
+        return "No Google token in your session — please sign in again."
+    try:
+        r = requests.post(
+            f"{pw_access.PROXY_BASE_URL}/api/allowlist",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"app": APP_NAME},
+            timeout=15,
+        )
+        if r.status_code == 401:
+            return "Proxy said 401 — your Google sign-in has expired. Please sign in again."
+        if r.status_code >= 500:
+            return f"Proxy is having trouble (HTTP {r.status_code}). Try again shortly."
+        return f"Proxy responded HTTP {r.status_code}."
+    except Exception as e:
+        return f"Couldn't reach the proxy ({type(e).__name__}). Check your internet and retry."
+
+
+def _reauth_screen(message: str) -> None:
+    """Show a clean 'sign in again' screen (used when the Google token expired)."""
+    _render_global_styles()
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=96)
+    st.warning(message)
+    st.caption(f"Signed in as {_current_user_email()}")
+    if st.button("Sign in again", type="primary"):
+        try:
+            st.login("google")          # user click -> re-auth, fetches a fresh token
+        except Exception:
+            _logout_user()
+    st.stop()
 
 
 def _active_theme() -> str:
@@ -446,6 +498,12 @@ def _require_allowed_google_user() -> None:
         _logout_user()
         st.stop()
 
+    # The Google token expires long before the 7-day session (Streamlit doesn't
+    # refresh it). Once it's stale the proxy 401s on every check, so re-auth here
+    # instead of leaving the user stuck on a "couldn't verify access" loop.
+    if _google_token_expired():
+        _reauth_screen("Your Google sign-in has expired. Please sign in again to continue.")
+
     # Step 1 - identity: must be a @pw.live Google account (fast, friendly check).
     email = _current_user_email()
     if not email or not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
@@ -471,11 +529,16 @@ def _require_allowed_google_user() -> None:
                 f"your email to the '{APP_NAME}' column of the Whitelisted sheet."
             )
         else:  # "error" - proxy unreachable / token problem
-            st.error(
-                "Couldn't verify your access with the PW proxy (it may be "
-                "temporarily unreachable, or you need to sign in again). Please "
-                "try again in a moment."
-            )
+            detail = _proxy_error_detail(_google_proxy_token())
+            st.error("Couldn't verify your access with the PW proxy.")
+            st.caption(detail)
+            # If it's a token problem, offer a one-click re-login right here.
+            if "sign in again" in detail.lower():
+                if st.button("Sign in again", type="primary"):
+                    try:
+                        st.login("google")
+                    except Exception:
+                        _logout_user()
         st.caption(f"Signed in as {email}")
         if st.button("Sign out", use_container_width=False):
             _logout_user()
@@ -525,6 +588,7 @@ SUBJECT_OPTIONS = {
     "Biology": "biology",
     "Physics": "physics",
     "Chemistry": "chemistry",
+    "Mathematics": "mathematics",
 }
 LANGUAGE_OPTIONS = ["English", "Hindi"]
 SEND_IMAGES = True
@@ -655,6 +719,9 @@ with st.container(border=True):
 
 if run_button and uploaded_files:
     google_token = _google_proxy_token()
+    # If the Google token has expired since login, re-auth before doing anything.
+    if _google_token_expired():
+        _reauth_screen("Your Google sign-in has expired. Please sign in again, then generate.")
     # Re-check authorization at generate time as defense-in-depth (login already
     # gated on this). The PW proxy Whitelisted sheet is the single source of
     # truth; uses the cached result to avoid an extra proxy round-trip.
@@ -669,10 +736,8 @@ if run_button and uploaded_files:
     elif access_status == "error":
         # The PW proxy Whitelisted sheet is the ONLY source of truth — there is
         # no local fallback. If the proxy can't be reached, fail closed.
-        st.error(
-            "Couldn't verify your access with the PW proxy (it may be temporarily "
-            "unreachable, or you need to sign in again). Please retry in a moment."
-        )
+        st.error("Couldn't verify your access with the PW proxy.")
+        st.caption(_proxy_error_detail(google_token))
 
     if authorized:
         st.session_state.results = []

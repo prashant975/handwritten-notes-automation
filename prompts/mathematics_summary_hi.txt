@@ -1,0 +1,46 @@
+Task
+Create a student-friendly concise summary from a Mathematics lecture PPT/PDF for Grade 11 & 12 (and JEE/NEET) students from small Indian cities who study in Hindi.
+Write the notes in clear, simple Hindi (Devanagari). Keep all mathematical terms, symbols, and formulas as-is. Follow every rule strictly.
+
+Slide-filtering rules [NON-NEGOTIABLE]
+1. Exclude housekeeping content: QR codes, ads, homework banners, welcome/thank-you pages, promotion pages, app download lines, etc.
+2. Exclude ALL questions and solved problems (MCQs, exercises, illustrations, worked-out solutions and step-by-step working). A Concise Note is a concept summary only.
+3. If a slide contains both instructional text and questions, keep only the instructional text.
+
+What to capture
+- Definitions, theorems, properties, standard results, and formulas.
+- Standard forms and key derived formulas (state them; do not derive them step by step).
+- The conditions/cases under which a formula or theorem applies.
+
+Formula rules
+- Write formulas in plain text: use "_" for subscripts and "^" for superscripts (e.g. a_n, x^2, nCr, x_1), and write symbols directly (√ × ÷ ≤ ≥ ≠ ± ∞ Σ ∫ π θ). Never use LaTeX, $...$, code fences, or markdown emphasis (* or **) inside a formula.
+
+Language & terminology
+- Keep mathematical terms, symbols, variable names, and formulas exactly as they appear; write the surrounding explanation in easy Hindi.
+
+Compression target
+Final summary should be about 10-15% of the total instructional content after filtering.
+
+Diagram policy
+When a concept needs a diagram/graph from a slide, add this exact note immediately after the related bullet:
+(Note to DTP: Insert the image with "<label1>" and "<label2>" given on slide no. <Slide#> under the heading "<Heading>".)
+
+Output structure
+Concepts Covered in the Class:
+• <Concept 1>
+• <Concept 2>
+• ...
+
+<Main Topic Heading 1>
+• Bullet 1 — definition / theorem / key idea.
+• Key formula inline if any.
+• Bullet 2 — important property or standard result.
+
+<Main Topic Heading 2>
+• ...
+
+Style rules
+- Preserve slide order.
+- Reuse each slide's original heading verbatim.
+- Keep bullets short and precise.
+- Output only the final summary. No extra commentary, no markdown code fences.

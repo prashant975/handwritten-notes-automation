@@ -82,13 +82,13 @@ def _apply_font(run, *, size, bold=False, italic=False, underline=False, color=N
 
 
 def add_title_block(doc, subject: str, chapter_title: str):
-    """Subject + chapter, centered, red italic underlined (PW cover style)."""
+    """Subject + chapter, centered, red bold underlined (PW cover style)."""
     subj = (subject or "").strip().capitalize()
     if subj:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_after = Pt(4)
-        _apply_font(p.add_run(subj), size=Pt(26), bold=True, italic=True, underline=True, color=TITLE_COLOR)
+        _apply_font(p.add_run(subj), size=Pt(26), bold=True, italic=False, underline=True, color=TITLE_COLOR)
     if chapter_title:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER

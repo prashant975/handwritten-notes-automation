@@ -59,5 +59,5 @@ DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
 LANGUAGE_CODES = {"English": "en", "Hindi": "hi", "en": "en", "hi": "hi"}
-SUBJECTS = ["biology", "physics", "chemistry"]
+SUBJECTS = ["biology", "physics", "chemistry", "mathematics"]
 MODES = ["complete", "summary"]

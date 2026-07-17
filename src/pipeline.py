@@ -71,7 +71,7 @@ def run_pipeline(
         if not subject or subject.strip().lower() in {"auto", ""}:
             from .subject_detect import detect_subject
 
-            slide_text = "\n".join((s.heading or "") + " " + (s.text or "") for s in slides[:12])
+            slide_text = "\n".join((s.heading or "") + " " + (s.text or "") for s in slides[:30])
             subject = detect_subject(input_path.stem, slide_text)
             warnings.append(f"Subject auto-detected as: {subject}")
         write_json(run_dir / "slides_raw.json", [s.__dict__ for s in slides])
