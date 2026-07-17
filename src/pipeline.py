@@ -16,7 +16,7 @@ from .pdf_exporter import export_docx_to_pdf
 from .prompt_builder import build_generation_prompt, build_merge_prompt
 from .quality_checker import quality_check
 from .slide_filter import filter_slides
-from .utils import chunked, copy_input, ensure_dir, make_run_id, safe_name, write_json, zip_dir
+from .utils import chunked, copy_input, ensure_dir, make_run_id, preserve_filename, write_json, zip_dir
 
 
 def _api_call_metadata(resp, **extra) -> dict:
@@ -169,9 +169,9 @@ def run_pipeline(
 
         output_dir = ensure_dir(run_dir / "output")
         chapter_title = derive_chapter_title(input_path.stem)
-        # Output name = the uploaded file's name + "_Concise_Notes" (kept exactly
-        # as uploaded; only made filesystem-safe).
-        output_stem = safe_name(input_path.stem)
+        # Output name = the uploaded file's name kept EXACTLY (spaces, case,
+        # Hindi, etc. preserved) + "_Concise_Notes".
+        output_stem = preserve_filename(input_path.stem)
         docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
         docx_path, docx_warnings = write_notes_docx(notes_text, docx_path, slides, run_dir=run_dir, image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy, subject=subject, chapter_title=chapter_title)
         warnings.extend(docx_warnings)

@@ -25,6 +25,16 @@ def safe_name(name: str, default: str = "file") -> str:
     return name or default
 
 
+def preserve_filename(name: str, default: str = "file") -> str:
+    """Keep the uploaded file's name EXACTLY for the output file — spaces, case,
+    Unicode (Hindi), dots and dashes are all preserved. Only strips the handful
+    of characters that are illegal in a Windows/most filesystem file name
+    (<>:"/\\|?*), collapses runs of whitespace, and trims trailing dots/spaces."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", name)
+    name = re.sub(r"\s+", " ", name).strip().strip(". ")
+    return name or default
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
