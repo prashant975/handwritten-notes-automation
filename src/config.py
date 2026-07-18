@@ -27,7 +27,7 @@ OUTPUTS_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT_DIR / "outputs"))).expanduse
 APP_NAME = os.getenv("APP_NAME", "Handwritten Notes Automation")
 # Shown in the UI so stale team installs are identifiable at a glance.
 # Bump when sharing a new team build.
-APP_VERSION = "2026.07.17"
+APP_VERSION = "2026.07.18"
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}

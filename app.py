@@ -11,7 +11,7 @@ import requests
 import streamlit as st
 
 import pw_access
-from src.ai_client import GeminiError
+from src.ai_client import GeminiClient, GeminiError
 from src.config import APP_NAME, APP_VERSION, DEFAULT_IMAGE_MODEL, DEFAULT_MODEL, SUBJECTS
 from src.pipeline import run_pipeline
 
@@ -480,23 +480,31 @@ def _render_login_page() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _mark_admitted(email: str) -> None:
+    st.session_state["_admitted_email"] = email
+
+
+def _is_admitted(email: str) -> bool:
+    return bool(email) and st.session_state.get("_admitted_email") == email
+
+
 def _require_allowed_google_user() -> None:
+    """Gate ENTRY to the app. Deliberately does NOT re-validate the short-lived
+    Google token on every rerun — otherwise a download-button click (which is a
+    rerun) would bounce an admitted user to a re-auth screen once their ~1h token
+    expired, interrupting the download and looking like a logout. Token freshness
+    is enforced only where it's actually needed: at generation time.
+    """
     is_logged_in = bool(getattr(st.user, "is_logged_in", False))
     if not is_logged_in:
         _render_login_page()
         st.stop()
 
-    if _auth_session_expired():
+    if _auth_session_expired():   # 7-day cap, local check
         _logout_user()
         st.stop()
 
-    # The Google token expires long before the 7-day session (Streamlit doesn't
-    # refresh it). Once it's stale the proxy 401s on every check, so re-auth here
-    # instead of leaving the user stuck on a "couldn't verify access" loop.
-    if _google_token_expired():
-        _reauth_screen("Your Google sign-in has expired. Please sign in again to continue.")
-
-    # Step 1 - identity: must be a @pw.live Google account (fast, friendly check).
+    # Identity: must be a @pw.live Google account (fast, local check).
     email = _current_user_email()
     if not email or not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
         _render_global_styles()
@@ -507,34 +515,39 @@ def _require_allowed_google_user() -> None:
             _logout_user()
         st.stop()
 
-    # Step 2 - authorization: the PW proxy's "Whitelisted" sheet is the single
-    # source of truth. Only users listed under this app's column may log in;
-    # everyone else is stopped here, before they can see the app. Fails closed
-    # if the proxy is unreachable. (Result is cached for a few minutes so this
-    # doesn't call the proxy on every rerun.)
+    # Authorization via the PW proxy "Whitelisted" sheet (single source of truth).
     status = _proxy_access_status()
-    if status != "allowed":
-        _render_global_styles()
-        if status == "denied":
-            st.error(
-                "This account isn't authorized for this app. Ask an admin to add "
-                f"your email to the '{APP_NAME}' column of the Whitelisted sheet."
-            )
-        else:  # "error" - proxy unreachable / token problem
-            detail = _proxy_error_detail(_google_proxy_token())
-            st.error("Couldn't verify your access with the PW proxy.")
-            st.caption(detail)
-            # If it's a token problem, offer a one-click re-login right here.
-            if "sign in again" in detail.lower():
-                if st.button("Sign in again", type="primary"):
-                    try:
-                        st.login("google")
-                    except Exception:
-                        _logout_user()
-        st.caption(f"Signed in as {email}")
-        if st.button("Sign out", use_container_width=False):
-            _logout_user()
-        st.stop()
+    if status == "allowed":
+        _mark_admitted(email)
+        return
+    # Once admitted this session, DON'T bounce the user on a later transient
+    # "error" (usually just their 1h token expiring) — they must stay able to
+    # view and download the files they already generated. Only a hard "denied"
+    # (removed from the sheet) or a first-time failure blocks entry.
+    if status == "error" and _is_admitted(email):
+        return
+
+    _render_global_styles()
+    if status == "denied":
+        st.session_state.pop("_admitted_email", None)
+        st.error(
+            "This account isn't authorized for this app. Ask an admin to add "
+            f"your email to the '{APP_NAME}' column of the Whitelisted sheet."
+        )
+    else:  # first-time "error" - proxy unreachable / token problem
+        detail = _proxy_error_detail(_google_proxy_token())
+        st.error("Couldn't verify your access with the PW proxy.")
+        st.caption(detail)
+        if "sign in again" in detail.lower():
+            if st.button("Sign in again", type="primary"):
+                try:
+                    st.login("google")
+                except Exception:
+                    _logout_user()
+    st.caption(f"Signed in as {email}")
+    if st.button("Sign out", use_container_width=False):
+        _logout_user()
+    st.stop()
 
 
 if "ui_theme" not in st.session_state:
@@ -555,6 +568,13 @@ with st.sidebar:
     st.caption(_current_user_email())
     if st.button("Sign out", key="sidebar_sign_out", use_container_width=True):
         _logout_user()
+    if st.button("Test Gemini connection", key="sidebar_test_gemini", use_container_width=True):
+        with st.spinner("Testing Gemini via the PW proxy…"):
+            try:
+                resp = GeminiClient(_google_proxy_token(), model=DEFAULT_MODEL).test_connection()
+                st.success(f"Gemini OK — {resp.model} via {resp.provider}.")
+            except Exception as exc:
+                st.error(f"Gemini test failed: {exc}")
     st.caption(f"Build {APP_VERSION}")
 
 st.markdown(
@@ -602,8 +622,43 @@ def _result_to_dict(name: str, result) -> dict:
         "zip": str(result.zip_path) if result.zip_path else None,
         "notes": notes,
         "warnings": list(result.warnings or []),
+        "usage_logged": _usage_logged(result),
         "error": None,
     }
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _file_bytes(path: str, size: int, mtime: float) -> bytes:
+    """Read a finished output file's bytes ONCE and cache them (keyed on
+    path+size+mtime). Streamlit reruns the whole script on every download-button
+    click; without this cache each click would re-read every output file from
+    disk into memory, which is what made batches of downloads slow and flaky."""
+    return Path(path).read_bytes()
+
+
+def _download_button(col, label: str, path: str | None, mime: str, key: str, missing: str) -> None:
+    """One self-contained download button. Bytes are loaded once from the
+    persistent run folder (never from a temp dir), so a click just re-serves the
+    already-prepared file — it never re-runs generation."""
+    with col:
+        p = Path(path) if path else None
+        if p and p.exists():
+            stat = p.stat()
+            st.download_button(
+                label,
+                data=_file_bytes(str(p), stat.st_size, stat.st_mtime),
+                file_name=p.name,
+                mime=mime,
+                key=key,
+                use_container_width=True,
+            )
+        else:
+            st.caption(missing)
+
+
+_MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_MIME_PDF = "application/pdf"
+_MIME_ZIP = "application/zip"
 
 
 def _notes_to_markdown(notes: str) -> str:
@@ -734,7 +789,6 @@ if run_button and uploaded_files:
                             ai_redraw_diagrams=AI_REDRAW, image_model=IMAGE_MODEL,
                         )
                         result_dict = _result_to_dict(uploaded.name, result)
-                        result_dict["usage_logged"] = _usage_logged(result)
                         st.session_state.results.append(result_dict)
                         st.write(f"✅ Finished **{uploaded.name}**")
                     except GeminiError as e:
@@ -768,24 +822,17 @@ if results:
                 st.warning("Usage logging failed on the PW proxy — this run was not recorded in the Usage Cost sheet.")
             for warning in r.get("warnings") or []:
                 st.warning(str(warning))
+            # Stable per-run keys so the same button identity survives reruns
+            # (a download click is a rerun) — prevents Streamlit from re-issuing
+            # or duplicating downloads.
+            rkey = re.sub(r"[^A-Za-z0-9]+", "_", (r.get("run_dir") or str(idx)).split("/")[-1].split("\\")[-1]) or str(idx)
             c1, c2, c3 = st.columns(3)
-            with c1:
-                if r["docx"] and Path(r["docx"]).exists():
-                    st.download_button("Download DOCX", Path(r["docx"]).read_bytes(), file_name=Path(r["docx"]).name, key=f"docx_{idx}", use_container_width=True)
-                else:
-                    st.caption("DOCX was not created.")
-            with c2:
-                if r["pdf"] and Path(r["pdf"]).exists():
-                    st.download_button("Download PDF", Path(r["pdf"]).read_bytes(), file_name=Path(r["pdf"]).name, key=f"pdf_{idx}", use_container_width=True)
-                else:
-                    st.caption("PDF unavailable. Install Microsoft Word or LibreOffice on this laptop, or use the DOCX.")
-            with c3:
-                if r["zip"] and Path(r["zip"]).exists():
-                    st.download_button("Download ZIP", Path(r["zip"]).read_bytes(), file_name=Path(r["zip"]).name, key=f"zip_{idx}", use_container_width=True)
-                else:
-                    st.caption("Run ZIP was not created.")
+            _download_button(c1, "Download DOCX", r.get("docx"), _MIME_DOCX, f"docx_{rkey}", "DOCX was not created.")
+            _download_button(c2, "Download PDF", r.get("pdf"), _MIME_PDF, f"pdf_{rkey}",
+                             "PDF unavailable. Install Microsoft Word or LibreOffice on this laptop, or use the DOCX.")
+            _download_button(c3, "Download ZIP", r.get("zip"), _MIME_ZIP, f"zip_{rkey}", "Run ZIP was not created.")
 
-            tab_preview, tab_images = st.tabs(["Preview", "Diagrams"])
+            tab_preview, tab_images, tab_debug = st.tabs(["Preview", "Diagrams", "Debug"])
             with tab_preview:
                 st.markdown(_notes_to_markdown(r["notes"]))
             with tab_images:
@@ -802,3 +849,16 @@ if results:
                             st.image(str(img), use_container_width=True)
                 else:
                     st.caption("No diagrams inserted for this file.")
+            with tab_debug:
+                rd = Path(r["run_dir"]) if r.get("run_dir") else None
+                meta = rd / "run_metadata.json" if rd else None
+                if meta and meta.exists():
+                    import json as _json
+                    try:
+                        st.json(_json.loads(meta.read_text(encoding="utf-8")))
+                    except Exception:
+                        st.caption("Could not read run_metadata.json.")
+                else:
+                    st.caption("No run log found for this file.")
+                if rd:
+                    st.caption(f"Run folder: {rd}")

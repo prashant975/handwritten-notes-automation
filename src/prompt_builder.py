@@ -5,15 +5,37 @@ from .models import SlideData
 
 PROMPT_DIR = ROOT_DIR / "prompts"
 
+# The two note styles the templates exist for, plus friendly aliases the UI or
+# CLI might use. "Concise Notes" IS the summary mode.
+_MODE_ALIASES = {
+    "concise": "summary",
+    "concise notes": "summary",
+    "short": "summary",
+    "brief": "summary",
+    "full": "complete",
+    "detailed": "complete",
+}
+
+
+def normalize_mode(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    return _MODE_ALIASES.get(m, m)
+
 
 def prompt_file_name(subject: str, mode: str, language_code: str) -> str:
-    return f"{subject.lower()}_{mode.lower()}_{language_code.lower()}.txt"
+    return f"{subject.lower()}_{normalize_mode(mode)}_{language_code.lower()}.txt"
 
 
 def load_prompt_template(subject: str, mode: str, language_code: str) -> str:
     path = PROMPT_DIR / prompt_file_name(subject, mode, language_code)
     if not path.exists():
-        raise FileNotFoundError(f"Prompt template not found: {path}")
+        # Friendly, actionable error instead of a bare FileNotFoundError.
+        available = sorted(p.name for p in PROMPT_DIR.glob("*.txt"))
+        raise FileNotFoundError(
+            f"No prompt template for subject='{subject}', mode='{normalize_mode(mode)}', "
+            f"language='{language_code}'. Expected file: {path.name} in {PROMPT_DIR}. "
+            f"Available templates: {available}"
+        )
     return path.read_text(encoding="utf-8")
 
 
@@ -67,7 +89,7 @@ def build_generation_prompt(subject: str, mode: str, language_code: str, slides:
         "√ × ÷ ≤ ≥ ± θ α β Δ π. Never use LaTeX, $...$, code fences, or markdown emphasis "
         "(* or **) inside a formula — an asterisk is only ever multiplication."
     )
-    if mode.lower() == "summary":
+    if normalize_mode(mode) == "summary":
         subject_rules += (
             "\n- SUMMARY MODE (STRICT): Keep it short. Capture only the key concepts and "
             "essential points as brief one-line bullets. Do NOT write long explanations, "
@@ -94,7 +116,7 @@ SLIDE DATA STARTS BELOW
 def build_merge_prompt(subject: str, mode: str, language_code: str, partial_notes: list[str]) -> str:
     template = load_prompt_template(subject, mode, language_code)
     joined = "\n\n".join(f"--- PART {i+1} ---\n{note}" for i, note in enumerate(partial_notes))
-    brevity = "\n- SUMMARY MODE (STRICT): Keep the merged notes short and concise; one-line bullets, no long explanations or elaboration." if mode.lower() == "summary" else ""
+    brevity = "\n- SUMMARY MODE (STRICT): Keep the merged notes short and concise; one-line bullets, no long explanations or elaboration." if normalize_mode(mode) == "summary" else ""
     return f"""{template}
 
 You are merging partial notes from consecutive slide chunks into one final set of notes.

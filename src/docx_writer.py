@@ -173,12 +173,32 @@ _LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
 _MULT_RE = re.compile(r"(?<=[0-9A-Za-z_)\]])(?:\*|\s+\*\s+)(?=[0-9A-Za-z_(\[√])")
 
 # Unit-vector / hat notation written as "i^", "k^" (a letter then a caret that
-# is NOT the start of a superscript). Turned into î / k̂ etc.
-_HAT_CARET_RE = re.compile(r"([A-Za-z])\^(?![A-Za-z0-9{])")
+# is NOT the start of a superscript). Turned into î / k̂ etc. The (?![+-]\s*\d)
+# guard keeps a NEGATIVE exponent like "s^-2" out of the hat rule.
+_HAT_CARET_RE = re.compile(r"([A-Za-z])\^(?![A-Za-z0-9{]|[+-]\s*\d)")
 
 # base + sub/superscript token. The token is a SINGLE character class so
 # "H_2O" subscripts only the "2" (not "2O"), while "v_AB" still subscripts "AB".
-_SCRIPT_RE = re.compile(r"([_^])(\{[^}]{1,40}\}|\d+|[A-Za-z]+)")
+# An optional leading sign captures negative/positive exponents: 10^-3, x^+2.
+_SCRIPT_RE = re.compile(r"([_^])(\{[^}]{1,40}\}|[+-]?\d+|[A-Za-z]+)")
+
+# Common chemical formulas — subscripted safely (whitelist => zero false
+# positives on things like "A4", "MP3", "Class 11"). Insert "_" before each
+# digit run that follows a letter, e.g. "CO2" -> "CO_2", handled downstream.
+_COMMON_FORMULAS = {
+    "H2O", "H2O2", "CO2", "CO", "O2", "O3", "N2", "H2", "Cl2", "Br2", "I2", "F2",
+    "SO2", "SO3", "NO2", "NO", "N2O", "N2O5", "P2O5", "CH4", "NH3", "HCl", "HBr",
+    "H2S", "H2SO4", "HNO3", "H3PO4", "H2CO3", "CaCO3", "NaOH", "KOH", "Ca(OH)2",
+    "CaO", "MgO", "Al2O3", "Fe2O3", "Fe3O4", "CuO", "Cu2O", "ZnO", "SiO2", "CaCl2",
+    "MgCl2", "AlCl3", "FeCl3", "AgCl", "BaSO4", "CaSO4", "CuSO4", "ZnSO4", "FeSO4",
+    "Na2SO4", "K2SO4", "KMnO4", "K2Cr2O7", "NH4Cl", "Na2CO3", "NaHCO3", "KNO3",
+    "NaNO3", "C2H4", "C2H6", "C2H2", "C6H6", "C6H12O6", "C12H22O11", "C2H5OH",
+    "CH3OH", "CH3COOH", "HCOOH", "Ca(OH)2", "Mg(OH)2", "H2O2",
+}
+_COMMON_FORMULA_RE = re.compile(
+    r"(?<![A-Za-z0-9])(" + "|".join(re.escape(f) for f in sorted(_COMMON_FORMULAS, key=len, reverse=True))
+    + r")(?![A-Za-z0-9])"
+)
 
 
 def _accent_sub(m):
@@ -236,6 +256,10 @@ def _normalize_math(text: str) -> str:
     # ASCII maths.
     text = re.sub(r"\bsqrt\s*\(", "√(", text, flags=re.I)
     text = _MULT_RE.sub("×", text)
+    # Mark subscripts in known bare chemical formulas ("CO2" -> "CO_2") so they
+    # render even when the model forgot the "_" the prompt asked for.
+    text = _COMMON_FORMULA_RE.sub(
+        lambda m: re.sub(r"(?<=[A-Za-z)])(\d+)", r"_\1", m.group(1)), text)
     text = _HAT_CARET_RE.sub(lambda m: _accent(m.group(1), _HAT), text)
     text = re.sub(r"\^\s*\{?\s*°\s*\}?", "°", text)   # 30^\circ / 30^{°} -> 30°
     text = _GREEK_RE.sub(_greek_sub, text)
