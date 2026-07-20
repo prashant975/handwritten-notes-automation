@@ -27,10 +27,22 @@ OUTPUTS_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT_DIR / "outputs"))).expanduse
 APP_NAME = os.getenv("APP_NAME", "Handwritten Notes Automation")
 # Shown in the UI so stale team installs are identifiable at a glance.
 # Bump when sharing a new team build.
-APP_VERSION = "2026.07.18"
+APP_VERSION = "2026.07.20"
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
 LANGUAGE_CODES = {"English": "en", "Hindi": "hi", "en": "en", "hi": "hi"}
 SUBJECTS = ["biology", "physics", "chemistry", "mathematics"]
 MODES = ["complete", "summary"]
+
+# Target exam -> the prompts/<value>_concise_en.txt template used for concise
+# notes. "" means "no exam-specific prompt, use the subject template".
+EXAMS = {"JEE": "jee", "NEET": "neet", "JEE + NEET": "jee_neet"}
+
+# How maths inside [[MATH_INLINE:]] / [[MATH_BLOCK:]] tags is written to DOCX.
+MATH_RENDER_MODES = {
+    "Native Word Equation / OMML": "omml",
+    "Unicode fallback": "unicode",
+    "Plain text debug": "plain",
+}
+DEFAULT_MATH_RENDER_MODE = "omml"

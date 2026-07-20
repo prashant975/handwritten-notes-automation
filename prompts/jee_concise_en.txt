@@ -1,0 +1,84 @@
+Task
+Create concise, exam-oriented JEE notes from a lecture PPT/PDF for Class 11 & 12 students preparing for JEE Main and JEE Advanced.
+Write in clear, simple English. Follow every rule strictly.
+
+Slide-filtering rules [NON-NEGOTIABLE]
+1. Exclude housekeeping content: QR codes, ads, homework banners, welcome/thank-you pages, promotion/subscription pages, app-download lines, batch announcements.
+2. Exclude jokes, filler chat, and motivational asides that carry no physics/chemistry/maths content.
+3. Exclude unsolved questions, MCQs, answer options, and practice/exercise slides.
+4. Include a solved example ONLY when the concept cannot be understood without it. Then keep just the key step and the result, never the full arithmetic.
+5. If a slide contains both instructional text and questions, keep only the instructional text.
+
+Compression target
+Keep roughly 10–15% of the instructional content after filtering. Every bullet must be one short line.
+
+Output structure
+Concepts Covered in the Class:
+• <Concept 1>
+• <Concept 2>
+
+<Main Topic Heading>
+• Key concept in short.
+• Important formula: [[MATH_INLINE: <latex>]]
+• Important point or shortcut/trick.
+• Common mistake or exam trap, when the slide shows one.
+
+<Next Heading>
+• ...
+
+MATH NOTATION [ABSOLUTELY NON-NEGOTIABLE]
+Every formula, symbol, variable with a script, unit with a power, and chemical formula MUST be wrapped in a protected maths tag. Never write these as plain text.
+
+Inline maths (inside a sentence or bullet):
+[[MATH_INLINE: latex_here]]
+
+Displayed maths (a standalone equation on its own line):
+[[MATH_BLOCK:
+latex_here
+]]
+
+Write correct LaTeX inside the tags:
+- Vectors: [[MATH_INLINE: \vec{A}]], [[MATH_INLINE: \vec{B}]], [[MATH_INLINE: \vec{C}]]
+- Cross product: [[MATH_INLINE: \vec{A} \times \vec{B} = \vec{C}]]
+- Unit vectors: [[MATH_INLINE: \hat{i}, \hat{j}, \hat{k}]]
+- Cyclic order: [[MATH_INLINE: \hat{i} \rightarrow \hat{j} \rightarrow \hat{k}]]
+- Dot product: [[MATH_INLINE: \vec{A} \cdot \vec{B} = AB\cos\theta]]
+- Magnitude: [[MATH_INLINE: |\vec{A} \times \vec{B}| = AB\sin\theta]]
+- Superscript: [[MATH_INLINE: x^2]]
+- Subscript: [[MATH_INLINE: v_0]]
+- Combined: [[MATH_INLINE: a_n = \frac{v^2}{r}]]
+- Chemistry: [[MATH_INLINE: H_2O]], [[MATH_INLINE: CO_2]], [[MATH_INLINE: SO_4^{2-}]]
+- Units: [[MATH_INLINE: m\,s^{-2}]], [[MATH_INLINE: mol\,L^{-1}]]
+
+NEVER output these:
+A x B = C
+i -> j -> k
+H2O
+CO2
+ms-2
+
+ALWAYS output these instead:
+[[MATH_INLINE: \vec{A} \times \vec{B} = \vec{C}]]
+[[MATH_INLINE: \hat{i} \rightarrow \hat{j} \rightarrow \hat{k}]]
+[[MATH_INLINE: H_2O]]
+[[MATH_INLINE: CO_2]]
+[[MATH_INLINE: m\,s^{-2}]]
+
+Preserve the teacher's notation
+If the slide shows a vector arrow, cap/hat, bar, dot, subscript, superscript, Greek symbol, angle, degree, plus/minus, root or fraction — reproduce it EXACTLY using LaTeX inside a maths tag.
+
+Do not simplify equations
+- Do not turn a formula into words only.
+- Do not drop vector arrows or unit-vector hats.
+- Do not drop powers or subscripts.
+- Do not replace \times with a plain "x" when it means a cross product.
+
+Diagram policy
+When a concept needs a diagram, add this exact note immediately after the related bullet:
+(Note to DTP: Insert the image with "<label1>" and "<label2>" given on slide no. <Slide#> under the heading "<Heading>".)
+
+Style rules
+- Preserve lecture/slide order.
+- Reuse the original slide headings verbatim wherever possible.
+- Keep JEE-relevant depth: definitions, formulas, conditions of validity, sign conventions, limiting cases.
+- Output only the final notes. No commentary, no markdown code fences.

@@ -13,6 +13,22 @@ from .docx_layout import add_title_block, add_watermark, is_kalam_installed, set
 from .dtp_parser import parse_dtp_note
 from .image_regions import crop_region, detect_regions
 from .image_tools import extract_pw_logo, smart_crop_image
+from .math_renderer import (
+    ARROW as _ARROW,
+    BAR as _BAR,
+    COMMON_FORMULAS as _COMMON_FORMULAS,
+    HAT as _HAT,
+    LATEX_SYMBOLS as _LATEX_SYMBOLS,
+    MATH_FONT,
+    MATH_TAG_RE,
+    PRE_HAT as _PRE_HAT,
+    RENDER_OMML,
+    accent as _accent,
+    add_block_math,
+    add_inline_math,
+    has_math_tag,
+    split_math_segments,
+)
 from .models import SlideData
 
 BODY_FONT = "Kalam"
@@ -40,10 +56,12 @@ def _set_no_same_style_spacing(p):
         ppr.append(OxmlElement("w:contextualSpacing"))
 
 
-def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=False, color=DARK_GREY):
-    run.font.name = BODY_FONT
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    run._element.rPr.rFonts.set(qn("w:cs"), BODY_FONT)
+def _set_run_font(run, *, size=BODY_SIZE, bold=False, italic=False, underline=False, color=DARK_GREY, font=BODY_FONT):
+    # `font` is overridden to a maths font for formula runs: Kalam has no
+    # combining arrow/hat glyphs, so forcing it is what erases vectors and hats.
+    run.font.name = font
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+    run._element.rPr.rFonts.set(qn("w:cs"), font)
     run.font.size = size
     run.font.bold = bold
     run.font.italic = italic
@@ -113,45 +131,9 @@ def _greek_sub(m):
     return _GREEK[low]
 
 
-# LaTeX command -> symbol. Models emit LaTeX for maths even when told not to,
-# so it is normalised here rather than trusted away in the prompt.
-_LATEX_SYMBOLS = {
-    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓", "ast": "×",
-    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
-    "approx": "≈", "equiv": "≡", "propto": "∝", "infty": "∞", "cong": "≅",
-    "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒",
-    "leftrightarrow": "↔", "Leftrightarrow": "⇔", "implies": "⇒", "iff": "⇔",
-    "sum": "Σ", "prod": "Π", "int": "∫", "oint": "∮", "partial": "∂", "nabla": "∇",
-    "degree": "°", "circ": "°", "angle": "∠", "perp": "⊥", "parallel": "∥",
-    "therefore": "∴", "because": "∵", "sqrt": "√", "cdots": "⋯", "ldots": "…",
-    "vdots": "⋮", "prime": "′", "mid": "∣", "triangle": "△",
-    # set theory / logic / relations (common in maths notes)
-    "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂", "subseteq": "⊆",
-    "supset": "⊃", "supseteq": "⊇", "cup": "∪", "cap": "∩", "setminus": "∖",
-    "emptyset": "∅", "varnothing": "∅", "forall": "∀", "exists": "∃",
-    "nexists": "∄", "Leftarrow": "⇐", "mapsto": "↦",
-    "langle": "⟨", "rangle": "⟩",
-    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "Delta": "Δ",
-    "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ",
-    "vartheta": "θ", "Theta": "Θ", "iota": "ι", "kappa": "κ", "lambda": "λ",
-    "Lambda": "Λ", "mu": "μ", "nu": "ν", "xi": "ξ", "Xi": "Ξ", "rho": "ρ",
-    "varrho": "ρ", "sigma": "σ", "Sigma": "Σ", "tau": "τ", "upsilon": "υ",
-    "phi": "φ", "varphi": "φ", "Phi": "Φ", "chi": "χ", "psi": "ψ", "Psi": "Ψ",
-    "omega": "ω", "Omega": "Ω", "pi": "π", "Pi": "Π",
-}
-
-# Combining accents for vector / hat / bar notation.
-_HAT, _ARROW, _BAR = "̂", "⃗", "̄"
-_PRE_HAT = {"i": "î", "j": "ĵ"}
-
-
-def _accent(base: str, comb: str) -> str:
-    base = base.strip()
-    if not base:
-        return base
-    if comb == _HAT and len(base) == 1 and base in _PRE_HAT:
-        return _PRE_HAT[base]
-    return base + comb                          # combining char attaches to last letter
+# The LaTeX symbol table, combining accents (_HAT/_ARROW/_BAR) and the chemical
+# formula whitelist all live in math_renderer now, so the tagged-maths path and
+# this plain-text normaliser can never drift apart. They are imported above.
 
 
 # Always-safe display math: $$..$$, \(..\), \[..\]. Inline $..$ is handled
@@ -185,16 +167,6 @@ _SCRIPT_RE = re.compile(r"([_^])(\{[^}]{1,40}\}|[+-]?\d+|[A-Za-z]+)")
 # Common chemical formulas — subscripted safely (whitelist => zero false
 # positives on things like "A4", "MP3", "Class 11"). Insert "_" before each
 # digit run that follows a letter, e.g. "CO2" -> "CO_2", handled downstream.
-_COMMON_FORMULAS = {
-    "H2O", "H2O2", "CO2", "CO", "O2", "O3", "N2", "H2", "Cl2", "Br2", "I2", "F2",
-    "SO2", "SO3", "NO2", "NO", "N2O", "N2O5", "P2O5", "CH4", "NH3", "HCl", "HBr",
-    "H2S", "H2SO4", "HNO3", "H3PO4", "H2CO3", "CaCO3", "NaOH", "KOH", "Ca(OH)2",
-    "CaO", "MgO", "Al2O3", "Fe2O3", "Fe3O4", "CuO", "Cu2O", "ZnO", "SiO2", "CaCl2",
-    "MgCl2", "AlCl3", "FeCl3", "AgCl", "BaSO4", "CaSO4", "CuSO4", "ZnSO4", "FeSO4",
-    "Na2SO4", "K2SO4", "KMnO4", "K2Cr2O7", "NH4Cl", "Na2CO3", "NaHCO3", "KNO3",
-    "NaNO3", "C2H4", "C2H6", "C2H2", "C6H6", "C6H12O6", "C12H22O11", "C2H5OH",
-    "CH3OH", "CH3COOH", "HCOOH", "Ca(OH)2", "Mg(OH)2", "H2O2",
-}
 _COMMON_FORMULA_RE = re.compile(
     r"(?<![A-Za-z0-9])(" + "|".join(re.escape(f) for f in sorted(_COMMON_FORMULAS, key=len, reverse=True))
     + r")(?![A-Za-z0-9])"
@@ -269,7 +241,7 @@ def _normalize_math(text: str) -> str:
     return text
 
 
-def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, highlight):
+def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, highlight, font=BODY_FONT):
     """Add `clean` as runs, rendering H_2O / v_AB / x^2 as real sub/superscripts.
 
     A letter subscript/superscript only fires when its base is a lone atom (a
@@ -281,7 +253,7 @@ def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, h
         if not chunk:
             return
         run = p.add_run(chunk)
-        _set_run_font(run, size=size, bold=bold, italic=italic, underline=underline, color=color)
+        _set_run_font(run, size=size, bold=bold, italic=italic, underline=underline, color=color, font=font)
         if sub:
             run.font.subscript = True
         if sup:
@@ -307,27 +279,49 @@ def _add_scripted_runs(p, clean: str, *, size, color, bold, italic, underline, h
     _emit(clean[pos:])
 
 
-def _add_markdown_runs(p, text: str, *, size=BODY_SIZE, base_color=DARK_GREY, default_bold: bool = False, underline: bool = False, highlight=None):
-    for part in _MD_RE.split(_normalize_math(text)):
-        if part == "":
+def _math_fallback_writer(paragraph, text: str, *, size=None, color=None):
+    """Write a formula's Unicode fallback using the maths font.
+
+    Any ``^``/``_`` marker latex_to_unicode could not map to a Unicode glyph is
+    turned into a REAL Word superscript/subscript run here, so nothing is lost.
+    """
+    _add_scripted_runs(
+        paragraph, text, size=size or BODY_SIZE, color=color if color is not None else DARK_GREY,
+        bold=False, italic=False, underline=False, highlight=None, font=MATH_FONT,
+    )
+
+
+def _add_markdown_runs(p, text: str, *, size=BODY_SIZE, base_color=DARK_GREY, default_bold: bool = False, underline: bool = False, highlight=None, math_mode: str = RENDER_OMML, math_stats: dict | None = None):
+    """Render one line: protected maths tags become equations, the rest is prose."""
+    for kind, payload in split_math_segments(text):
+        if kind != "text":
+            used = add_inline_math(
+                p, payload, mode=math_mode, size=size, color=base_color,
+                fallback_writer=_math_fallback_writer,
+            )
+            if math_stats is not None:
+                math_stats[used] = math_stats.get(used, 0) + 1
             continue
-        bold = default_bold
-        italic = False
-        clean = part
-        if part.startswith("***") and part.endswith("***") and len(part) >= 6:
-            bold = italic = True
-            clean = part[3:-3]
-        elif part.startswith("**") and part.endswith("**") and len(part) >= 4:
-            bold = True
-            clean = part[2:-2]
-        elif part.startswith("*") and part.endswith("*") and len(part) >= 2:
-            italic = True
-            clean = part[1:-1]
-        _add_scripted_runs(
-            p, clean, size=size,
-            color=BOLD_COLOR if bold and not default_bold else base_color,
-            bold=bold, italic=italic, underline=underline, highlight=highlight,
-        )
+        for part in _MD_RE.split(_normalize_math(payload)):
+            if part == "":
+                continue
+            bold = default_bold
+            italic = False
+            clean = part
+            if part.startswith("***") and part.endswith("***") and len(part) >= 6:
+                bold = italic = True
+                clean = part[3:-3]
+            elif part.startswith("**") and part.endswith("**") and len(part) >= 4:
+                bold = True
+                clean = part[2:-2]
+            elif part.startswith("*") and part.endswith("*") and len(part) >= 2:
+                italic = True
+                clean = part[1:-1]
+            _add_scripted_runs(
+                p, clean, size=size,
+                color=BOLD_COLOR if bold and not default_bold else base_color,
+                bold=bold, italic=italic, underline=underline, highlight=highlight,
+            )
 
 
 def _is_dtp(line: str) -> bool:
@@ -355,8 +349,9 @@ _FORMULA_HINT_RE = re.compile(
 
 def _looks_like_formula(s: str) -> bool:
     """A standalone equation line (e.g. 'v_AB = v_A - v_B' or 'F = m*a') must not
-    be rendered as a green highlighted heading."""
-    return bool(_FORMULA_HINT_RE.search(s))
+    be rendered as a green highlighted heading. A protected maths tag always
+    counts, so a tagged equation on its own line never becomes a heading."""
+    return has_math_tag(s) or bool(_FORMULA_HINT_RE.search(s))
 
 
 def _is_heading(line: str) -> bool:
@@ -374,7 +369,7 @@ def _is_heading(line: str) -> bool:
     return True
 
 
-def _add_heading(doc: Document, line: str):
+def _add_heading(doc: Document, line: str, *, math_mode: str = RENDER_OMML, math_stats: dict | None = None):
     p = doc.add_paragraph()
     _set_paragraph_base(p)
     clean = line.strip().strip("#").strip()
@@ -386,6 +381,8 @@ def _add_heading(doc: Document, line: str):
         default_bold=True,
         underline=True,
         highlight=WD_COLOR_INDEX.BRIGHT_GREEN,
+        math_mode=math_mode,
+        math_stats=math_stats,
     )
     return p
 
@@ -396,7 +393,7 @@ def _add_blank_line(doc: Document):
     return p
 
 
-def _add_body(doc: Document, line: str, *, bullet: bool = False, indent_level: int = 0):
+def _add_body(doc: Document, line: str, *, bullet: bool = False, indent_level: int = 0, math_mode: str = RENDER_OMML, math_stats: dict | None = None):
     p = doc.add_paragraph()
     _set_paragraph_base(p, bullet=bullet, indent_level=indent_level)
     if bullet:
@@ -406,9 +403,9 @@ def _add_body(doc: Document, line: str, *, bullet: bool = False, indent_level: i
         if m:
             marker = BULLET_MARKERS[min(max(0, indent_level), len(BULLET_MARKERS) - 1)]
             s = f"{marker}\t{m.group(2)}"
-        _add_markdown_runs(p, s)
+        _add_markdown_runs(p, s, math_mode=math_mode, math_stats=math_stats)
     else:
-        _add_markdown_runs(p, line.strip())
+        _add_markdown_runs(p, line.strip(), math_mode=math_mode, math_stats=math_stats)
     return p
 
 
@@ -484,8 +481,27 @@ def _insert_slide_image(doc: Document, image_path: Path, run_dir: Path, mode: st
         return False
 
 
-def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData], *, run_dir: Path, image_insert_mode: str = "smart_crop", dtp_note_policy: str = "keep_note_and_insert_image", subject: str = "", chapter_title: str = "") -> tuple[Path, list[str]]:
+# A line that is nothing but a display equation.
+_BLOCK_ONLY_RE = re.compile(r"^\s*\[\[MATH_BLOCK:\s*(.*?)\]\]\s*$", re.S)
+
+
+def _normalize_math_tags(text: str) -> str:
+    """Put every [[MATH_BLOCK]] on its own line and flatten newlines inside tags.
+
+    The model writes block maths across several lines; collapsing it first means
+    the line-by-line writer below sees one complete equation per line.
+    """
+    def repl(m):
+        latex = " ".join(m.group(2).split())
+        if m.group(1) == "BLOCK":
+            return f"\n[[MATH_BLOCK: {latex}]]\n"
+        return f"[[MATH_INLINE: {latex}]]"
+    return MATH_TAG_RE.sub(repl, text)
+
+
+def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData], *, run_dir: Path, image_insert_mode: str = "smart_crop", dtp_note_policy: str = "keep_note_and_insert_image", subject: str = "", chapter_title: str = "", math_render_mode: str = RENDER_OMML) -> tuple[Path, list[str]]:
     warnings: list[str] = []
+    math_stats: dict[str, int] = {}
     slide_map = {s.slide_no: s for s in slides}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
@@ -523,9 +539,19 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
     content_added = False
     region_cache: dict = {}   # slide image -> detected diagram regions
     used_regions: dict = {}   # slide image -> how many of its regions are placed
-    for raw_line in notes_text.splitlines():
+    for raw_line in _normalize_math_tags(notes_text).splitlines():
         line = raw_line.rstrip()
         if not line.strip():
+            continue
+        block = _BLOCK_ONLY_RE.match(line)
+        if block:
+            # Displayed equation: its own centred paragraph.
+            _, used = add_block_math(
+                doc, block.group(1), mode=math_render_mode, size=BODY_SIZE,
+                color=DARK_GREY, fallback_writer=_math_fallback_writer,
+            )
+            math_stats[used] = math_stats.get(used, 0) + 1
+            content_added = True
             continue
         if _is_dtp(line):
             note = parse_dtp_note(line)
@@ -554,18 +580,28 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
         if _is_heading(line):
             if content_added:
                 _add_blank_line(doc)
-            _add_heading(doc, line)
+            _add_heading(doc, line, math_mode=math_render_mode, math_stats=math_stats)
             content_added = True
         elif _is_bullet(line):
             leading = len(raw_line) - len(raw_line.lstrip(" \t"))
             indent_level = min(3, leading // 4) if leading else 0
-            _add_body(doc, line, bullet=True, indent_level=indent_level)
+            _add_body(doc, line, bullet=True, indent_level=indent_level,
+                      math_mode=math_render_mode, math_stats=math_stats)
             content_added = True
         else:
-            _add_body(doc, line, bullet=False)
+            _add_body(doc, line, bullet=False, math_mode=math_render_mode, math_stats=math_stats)
             content_added = True
     doc.save(str(output_path))
     warnings.append(f"Inserted {inserted_images} image(s) from DTP notes.")
+    total_math = sum(math_stats.values())
+    if total_math:
+        parts = ", ".join(f"{n} {k}" for k, n in sorted(math_stats.items()))
+        warnings.append(f"Rendered {total_math} formula(s) ({parts}).")
+        if math_render_mode == RENDER_OMML and math_stats.get("unicode"):
+            warnings.append(
+                f"{math_stats['unicode']} formula(s) could not be built as a Word equation "
+                "and fell back to Unicode text."
+            )
     if not is_kalam_installed():
         warnings.append("Kalam handwritten font is not installed, so the notes render in a fallback font. Install Kalam (https://fonts.google.com/specimen/Kalam) for the handwritten PW style.")
     return output_path, warnings

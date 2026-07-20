@@ -6,9 +6,11 @@ from pathlib import Path
 import pw_access
 
 from .ai_client import GeminiClient, GeminiError, generate_mock_notes
-from .config import LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
+from .config import DEFAULT_MATH_RENDER_MODE, LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
 from .docx_layout import derive_chapter_title
 from .docx_writer import write_notes_docx
+from .equation_quality import check_equations, warnings_from_report, write_reports
+from .equation_repair import repair_equations
 from .extract_pdf import extract_pdf
 from .extract_pptx import extract_pptx
 from .models import PipelineResult, SlideData
@@ -55,6 +57,9 @@ def run_pipeline(
     dtp_note_policy: str = "keep_note_and_insert_image",
     ai_redraw_diagrams: bool = False,
     image_model: str = "gemini-2.5-flash-image",
+    exam: str = "",
+    strict_math: bool = True,
+    math_render_mode: str = DEFAULT_MATH_RENDER_MODE,
 ) -> PipelineResult:
     input_path = Path(input_path)
     run_dir = ensure_dir(RUNS_DIR / make_run_id("run"))
@@ -110,7 +115,7 @@ def run_pipeline(
             chunks = list(chunked(active_slides, batch_size))
 
             def _run_chunk(i: int, slide_chunk):
-                prompt = build_generation_prompt(subject, mode, language_code, slide_chunk, chunk_label=f"{i}/{len(chunks)}")
+                prompt = build_generation_prompt(subject, mode, language_code, slide_chunk, chunk_label=f"{i}/{len(chunks)}", exam=exam, strict_math=strict_math)
                 images = [s.image_path for s in slide_chunk if s.image_path] if send_images_to_ai else []
                 resp = client.generate(prompt, images, max_images=max_images_per_call)
                 (run_dir / f"notes_chunk_{i:02d}.txt").write_text(resp.text, encoding="utf-8")
@@ -149,7 +154,7 @@ def run_pipeline(
             if len(partial_notes) == 1:
                 notes_text = partial_notes[0]
             else:
-                merge_prompt = build_merge_prompt(subject, mode, language_code, partial_notes)
+                merge_prompt = build_merge_prompt(subject, mode, language_code, partial_notes, exam=exam, strict_math=strict_math)
                 try:
                     resp = client.generate(merge_prompt, [], max_images=0)
                     notes_text = resp.text
@@ -159,6 +164,30 @@ def run_pipeline(
                     notes_text = "\n\n".join(partial_notes)
         raw_notes_path = run_dir / "notes_raw.txt"
         raw_notes_path.write_text(notes_text, encoding="utf-8")
+
+        # Equation safety net: repair formulas the model left as plain text, then
+        # report whatever notation is still missing. Repairs are recorded rather
+        # than applied silently.
+        equation_repairs: list[dict] = []
+        if strict_math:
+            notes_text, equation_repairs = repair_equations(notes_text)
+            if equation_repairs:
+                (run_dir / "notes_repaired.txt").write_text(notes_text, encoding="utf-8")
+                warnings.append(
+                    f"Repaired {len(equation_repairs)} formula(s) that were written as plain text."
+                )
+        equation_report = check_equations(notes_text)
+        write_reports(run_dir, equation_report, equation_repairs)
+        equation_warnings = warnings_from_report(equation_report)
+        warnings.extend(equation_warnings)
+        write_json(run_dir / "run_log.json", {
+            "equation_repairs": equation_repairs,
+            "equation_issues": equation_report.get("issues", []),
+            "tagged_formula_count": equation_report.get("tagged_formula_count", 0),
+            "strict_math": strict_math,
+            "math_render_mode": math_render_mode,
+            "exam": exam,
+        })
 
         # Optional: AI-redraw the diagrams referenced by DTP notes into handwritten
         # blue-on-white style, then insert those instead of the raw slide crops.
@@ -186,7 +215,7 @@ def run_pipeline(
         # Hindi, etc. preserved) + "_Concise_Notes".
         output_stem = preserve_filename(input_path.stem)
         docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
-        docx_path, docx_warnings = write_notes_docx(notes_text, docx_path, slides, run_dir=run_dir, image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy, subject=subject, chapter_title=chapter_title)
+        docx_path, docx_warnings = write_notes_docx(notes_text, docx_path, slides, run_dir=run_dir, image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy, subject=subject, chapter_title=chapter_title, math_render_mode=math_render_mode)
         warnings.extend(docx_warnings)
         pdf_path, pdf_warning = export_docx_to_pdf(docx_path, output_dir)
         if pdf_warning:
@@ -198,6 +227,13 @@ def run_pipeline(
             "subject": subject,
             "language": language_code,
             "mode": mode,
+            "exam": exam,
+            "strict_math": strict_math,
+            "math_render_mode": math_render_mode,
+            "equation_repairs": len(equation_repairs),
+            "equation_issues": equation_report.get("issue_count", 0),
+            "tagged_formula_count": equation_report.get("tagged_formula_count", 0),
+            "equation_warnings": equation_warnings,
             "model": model,
             "provider_requested": "pw_proxy",
             "usage_logged": usage_logged,

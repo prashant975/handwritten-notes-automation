@@ -12,7 +12,16 @@ import streamlit as st
 
 import pw_access
 from src.ai_client import GeminiClient, GeminiError
-from src.config import APP_NAME, APP_VERSION, DEFAULT_IMAGE_MODEL, DEFAULT_MODEL, SUBJECTS
+from src.config import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_MATH_RENDER_MODE,
+    DEFAULT_MODEL,
+    EXAMS,
+    MATH_RENDER_MODES,
+    SUBJECTS,
+)
 from src.pipeline import run_pipeline
 
 st.set_page_config(page_title="Concise Notes Automation", layout="wide")
@@ -593,12 +602,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # ---- Fixed configuration --------------------------------------------------
-MODE = "summary"
-# Subject + notes language are chosen by the user in the upload panel below.
-# Derived from config.SUBJECTS so the UI, CLI, and prompt templates always
-# offer the same subject list.
+# Subject, language, exam, note type and maths rendering are chosen by the user
+# in the upload panel below. Derived from config so the UI, CLI, and prompt
+# templates always offer the same lists.
 SUBJECT_OPTIONS = {s.capitalize(): s for s in SUBJECTS}
 LANGUAGE_OPTIONS = ["English", "Hindi"]
+EXAM_OPTIONS = dict(EXAMS)                     # label -> prompt key
+NOTE_TYPE_OPTIONS = {"Concise Notes": "summary", "Complete Notes": "complete"}
+MATH_RENDER_OPTIONS = dict(MATH_RENDER_MODES)  # label -> omml/unicode/plain
 SEND_IMAGES = True
 STRICT_FILTER = True
 DTP_POLICY = "hide_note_insert_image"
@@ -623,6 +634,10 @@ def _result_to_dict(name: str, result) -> dict:
         "notes": notes,
         "warnings": list(result.warnings or []),
         "usage_logged": _usage_logged(result),
+        "equation_warnings": list((result.metadata or {}).get("equation_warnings") or []),
+        "equation_repairs": (result.metadata or {}).get("equation_repairs", 0),
+        "equation_issues": (result.metadata or {}).get("equation_issues", 0),
+        "tagged_formula_count": (result.metadata or {}).get("tagged_formula_count", 0),
         "error": None,
     }
 
@@ -725,12 +740,54 @@ with st.container(border=True):
             index=0,
             help="The language the generated notes should be written in.",
         )
+    opt_col3, opt_col4 = st.columns(2)
+    with opt_col3:
+        exam_label = st.selectbox(
+            "Exam",
+            list(EXAM_OPTIONS.keys()),
+            index=None,
+            placeholder="No specific exam",
+            help="Picks a JEE/NEET-specific concise-notes prompt. Leave empty to use the subject prompt.",
+        )
+    with opt_col4:
+        note_type_label = st.selectbox(
+            "Note type",
+            list(NOTE_TYPE_OPTIONS.keys()),
+            index=0,
+            help="Concise Notes = a short concept summary. Complete Notes = full detail.",
+        )
+
+    with st.expander("Equation settings", expanded=False):
+        math_label = st.selectbox(
+            "Math rendering",
+            list(MATH_RENDER_OPTIONS.keys()),
+            index=0,
+            help=(
+                "Native Word Equation / OMML gives true Word equations (vector arrows, hats, "
+                "fractions) that survive to PDF. Unicode fallback writes symbols as text. "
+                "Plain text debug shows the raw LaTeX tags."
+            ),
+        )
+        strict_math = st.checkbox(
+            "Strict equation preservation",
+            value=True,
+            help=(
+                "Forces the AI to wrap every formula in a maths tag, and repairs any formula "
+                "that still arrives as plain text (A x B = C, i -> j -> k, H2O) before the "
+                "DOCX is written."
+            ),
+        )
+
     SUBJECT = SUBJECT_OPTIONS.get(subject_label) if subject_label else None
     LANGUAGE = language_label
+    EXAM = EXAM_OPTIONS.get(exam_label, "") if exam_label else ""
+    MODE = NOTE_TYPE_OPTIONS.get(note_type_label, "summary")
+    MATH_RENDER_MODE = MATH_RENDER_OPTIONS.get(math_label, DEFAULT_MATH_RENDER_MODE)
+    STRICT_MATH = bool(strict_math)
     if uploaded_files and not SUBJECT:
         st.caption("Select a subject to enable generation.")
     run_button = st.button(
-        "Generate Concise Notes",
+        f"Generate {note_type_label}",
         type="primary",
         disabled=not uploaded_files or not SUBJECT,
         use_container_width=True,
@@ -787,6 +844,8 @@ if run_button and uploaded_files:
                             send_images_to_ai=SEND_IMAGES, strict_filter=STRICT_FILTER,
                             allow_mock=False, image_insert_mode=IMAGE_MODE, dtp_note_policy=DTP_POLICY,
                             ai_redraw_diagrams=AI_REDRAW, image_model=IMAGE_MODEL,
+                            exam=EXAM, strict_math=STRICT_MATH,
+                            math_render_mode=MATH_RENDER_MODE,
                         )
                         result_dict = _result_to_dict(uploaded.name, result)
                         st.session_state.results.append(result_dict)
@@ -820,7 +879,12 @@ if results:
                 st.caption("Usage tracked in the PW Usage Cost sheet.")
             elif r.get("usage_logged") is False:
                 st.warning("Usage logging failed on the PW proxy — this run was not recorded in the Usage Cost sheet.")
+            # Equation warnings get their own tab, so keep them out of the
+            # general warning stack rather than showing each twice.
+            _eq_warnings = set(r.get("equation_warnings") or [])
             for warning in r.get("warnings") or []:
+                if str(warning) in _eq_warnings:
+                    continue
                 st.warning(str(warning))
             # Stable per-run keys so the same button identity survives reruns
             # (a download click is a rerun) — prevents Streamlit from re-issuing
@@ -832,7 +896,9 @@ if results:
                              "PDF unavailable. Install Microsoft Word or LibreOffice on this laptop, or use the DOCX.")
             _download_button(c3, "Download ZIP", r.get("zip"), _MIME_ZIP, f"zip_{rkey}", "Run ZIP was not created.")
 
-            tab_preview, tab_images, tab_debug = st.tabs(["Preview", "Diagrams", "Debug"])
+            tab_preview, tab_images, tab_equations, tab_debug = st.tabs(
+                ["Preview", "Diagrams", "Equations", "Debug"]
+            )
             with tab_preview:
                 st.markdown(_notes_to_markdown(r["notes"]))
             with tab_images:
@@ -849,6 +915,23 @@ if results:
                             st.image(str(img), use_container_width=True)
                 else:
                     st.caption("No diagrams inserted for this file.")
+            with tab_equations:
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Formulas rendered", r.get("tagged_formula_count", 0))
+                m2.metric("Auto-repaired", r.get("equation_repairs", 0))
+                m3.metric("Issues", r.get("equation_issues", 0))
+                eq_warnings = r.get("equation_warnings") or []
+                if eq_warnings:
+                    st.markdown("**Equation Quality Warnings**")
+                    for w in eq_warnings:
+                        st.warning(str(w))
+                else:
+                    st.success("No equation issues detected — every formula found is proper maths.")
+                rd_eq = Path(r["run_dir"]) if r.get("run_dir") else None
+                md_report = rd_eq / "equation_quality_report.md" if rd_eq else None
+                if md_report and md_report.exists():
+                    with st.expander("Full equation quality report"):
+                        st.markdown(md_report.read_text(encoding="utf-8"))
             with tab_debug:
                 rd = Path(r["run_dir"]) if r.get("run_dir") else None
                 meta = rd / "run_metadata.json" if rd else None
