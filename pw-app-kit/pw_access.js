@@ -10,6 +10,14 @@
  * (access token OR id token); the proxy verifies it, checks the app-wise
  * whitelist, calls the paid API with its own key, logs usage, returns result.
  *
+ * IMPORTANT — Google tokens expire after ~1 HOUR (the app session may be
+ * 7 days, but the Google token inside it is not). For anything that can run
+ * longer than an hour, pass a TOKEN PROVIDER instead of a raw string: a
+ * zero-arg (optionally async) function that returns a currently-valid token.
+ * Every helper here accepts either. With a provider, the kit fetches a token
+ * before each request and, on a 401, refreshes once and retries — so long
+ * runs survive the 1-hour expiry. See USAGE EXAMPLES at the bottom.
+ *
  * Works anywhere `fetch` exists: modern browsers, Node 18+, edge runtimes.
  * This file is ESM. For CommonJS, swap `export` for `module.exports = { ... }`.
  */
@@ -29,23 +37,42 @@ const _vertexCache = { token: "", project: "", location: "global", expiry: 0 };
 
 export class PWAccessError extends Error {}
 
-function authHeaders(googleToken) {
-  return { Authorization: `Bearer ${googleToken}`, "Content-Type": "application/json" };
+function authHeaders(token) {
+  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-async function postJSON(path, googleToken, body, timeoutMs) {
+/** `googleToken` may be a plain string OR a zero-arg (async) function — a
+ *  "token provider" — that returns a currently-valid token. A provider is what
+ *  makes runs longer than Google's ~1-hour token lifetime work. */
+async function resolveToken(googleToken) {
+  return typeof googleToken === "function" ? await googleToken() : googleToken;
+}
+
+async function postOnce(path, token, body, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     return await fetch(`${PROXY_BASE_URL}${path}`, {
       method: "POST",
-      headers: authHeaders(googleToken),
+      headers: authHeaders(token),
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** POST to the proxy. If a token provider (function) was supplied and the
+ *  proxy answers 401 — the token aged past ~1 hour mid-run — ask the provider
+ *  for a fresh token and retry ONCE. Raw string tokens keep the old behavior
+ *  (no retry possible: the kit has no way to refresh a string). */
+async function postJSON(path, googleToken, body, timeoutMs) {
+  let r = await postOnce(path, await resolveToken(googleToken), body, timeoutMs);
+  if (r.status === 401 && typeof googleToken === "function") {
+    r = await postOnce(path, await resolveToken(googleToken), body, timeoutMs);
+  }
+  return r;
 }
 
 /** "allowed" | "denied" | "error" — lets callers treat "proxy unreachable"
@@ -192,6 +219,21 @@ export async function sarvamTts(googleToken, { request, filename = "", count = n
   return data;
 }
 
+/** ElevenLabs Text-to-Speech through the proxy. Returns { ok, result, cost_inr };
+ *  `result` is { audio_base64, content_type: "audio/mpeg", output_format }.
+ *  `request` is the raw ElevenLabs TTS body: { text, model_id, voice_settings }.
+ *  `count` = characters billed; if omitted the proxy derives it from request.text. */
+export async function elevenLabsTts(googleToken,
+  { voice_id, request, output_format = "mp3_44100_128", filename = "", count = null, app = APP_NAME, session = null }) {
+  const body = { app, voice_id, request, output_format, filename, count };
+  if (session) body.log = false;
+  const r = await postJSON("/api/elevenlabs/tts", googleToken, body, AI_TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`elevenlabs proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const data = await r.json();
+  if (session) session.add(data.model || "ElevenLabs TTS", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+  return data;
+}
+
 /*
 USAGE EXAMPLES
 
@@ -210,12 +252,46 @@ USAGE EXAMPLES
   });
   console.log(out.result);   // raw Gemini response
 
+--- LONG RUNS (>1 hour): pass a token PROVIDER, not a string -------------
+  // Google tokens die after ~1 hour. A cached string WILL start failing with
+  // 401 mid-run. Instead pass a function that returns a fresh token; the kit
+  // calls it before each request and retries once on 401.
+  //
+  // Browser (GIS access-token flow — silent refresh, no popup while the
+  // user's Google session is alive):
+  const tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: YOUR_GOOGLE_CLIENT_ID, scope: "openid email", callback: () => {},
+  });
+  let cached = { token: "", expiry: 0 };
+  async function googleToken() {                    // <-- the provider
+    if (cached.token && Date.now() < cached.expiry - 5 * 60_000) return cached.token;
+    return new Promise((resolve, reject) => {
+      tokenClient.callback = (resp) => {
+        if (resp.error) return reject(new Error(resp.error));
+        cached = { token: resp.access_token, expiry: Date.now() + (resp.expires_in || 3600) * 1000 };
+        resolve(cached.token);
+      };
+      tokenClient.requestAccessToken({ prompt: "" }); // silent
+    });
+  }
+  await geminiGenerate(googleToken, { ... });        // note: the function itself, no ()
+
 --- Node / Vercel backend (token forwarded from your frontend) ---
-  import { checkAllowed, sarvamTts } from "./pw_access.js";
+  import { checkAllowed, sarvamTts, elevenLabsTts } from "./pw_access.js";
   // googleToken = the user's token your backend received after sign-in
+  // (for long backend jobs, forward a provider that re-fetches from your
+  //  OAuth refresh flow instead of a captured string)
   if (!(await checkAllowed(googleToken))) return res.status(403).end();
   const tts = await sarvamTts(googleToken, {
     request: { text: "नमस्ते", target_language_code: "hi-IN", model: "bulbul:v3", speaker: "anushka" },
     count: 6,
   });
+
+--- ElevenLabs TTS (browser or Node) ---
+  const out = await elevenLabsTts(googleToken, {
+    voice_id: "JBFqnCBsd6RMkjVDRZzb",
+    request: { text: "Hello there", model_id: "eleven_multilingual_v2" },
+    filename: "intro.mp3",
+  });
+  // out.result.audio_base64 → decode to bytes and save/play (audio/mpeg)
 */

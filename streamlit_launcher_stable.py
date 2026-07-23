@@ -12,6 +12,20 @@ from pathlib import Path
 
 PORT = 8501
 
+# MUST match the host in `redirect_uri` in .streamlit/secrets.toml
+# (http://localhost:8501/oauth2callback) — and it must be "localhost", never
+# "127.0.0.1".
+#
+# Browsers treat localhost and 127.0.0.1 as DIFFERENT cookie origins, and
+# Streamlit hard-rejects a login cookie whose origin doesn't match redirect_uri
+# ("Origin mismatch..." in starlette_websocket.py). Worse, Authlib keeps the
+# OAuth `state` in an origin-scoped session cookie, so a sign-in STARTED on
+# 127.0.0.1 and FINISHED on localhost loses its state and fails silently —
+# which looks exactly like "I logged in but it didn't work, let me try again".
+# Opening the app on the wrong host is therefore enough to force a fresh login
+# on every restart.
+HOST = "localhost"
+
 
 def _bundle_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -77,7 +91,7 @@ def _patch_streamlit_static_dir(bundle_dir: Path) -> None:
 
 
 def main() -> None:
-    url = f"http://127.0.0.1:{PORT}"
+    url = f"http://{HOST}:{PORT}"
     if not _port_is_free(PORT):
         print("")
         print(f"Port {PORT} is already in use.")
@@ -94,14 +108,18 @@ def main() -> None:
     os.environ.setdefault("HANDWRITTEN_NOTES_ENV", str(external_env if external_env.exists() else bundle_dir / ".env"))
     os.environ.setdefault("RUNS_DIR", str(runtime_dir / "runs"))
     os.environ.setdefault("OUTPUT_DIR", str(runtime_dir / "outputs"))
+    # The bundle dir can be read-only (Program Files), so keep the auth debug
+    # log beside runs/ and outputs/ where the user can actually find and send it.
+    os.environ.setdefault("PW_AUTH_LOG_DIR", str(runtime_dir / "logs"))
     os.environ["STREAMLIT_SERVER_PORT"] = str(PORT)
-    os.environ["STREAMLIT_BROWSER_SERVER_ADDRESS"] = "localhost"
+    os.environ["STREAMLIT_BROWSER_SERVER_ADDRESS"] = HOST
     os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
     os.environ["STREAMLIT_LOGGER_HIDE_WELCOME_MESSAGE"] = "true"
     os.environ["STREAMLIT_GLOBAL_DEVELOPMENT_MODE"] = "false"
 
     (runtime_dir / "runs").mkdir(exist_ok=True)
     (runtime_dir / "outputs").mkdir(exist_ok=True)
+    (runtime_dir / "logs").mkdir(exist_ok=True)
 
     if getattr(sys, "frozen", False):
         os.chdir(str(bundle_dir))
@@ -113,7 +131,7 @@ def main() -> None:
         "server.port": PORT,
         "server.headless": True,
         "logger.hideWelcomeMessage": True,
-        "browser.serverAddress": "localhost",
+        "browser.serverAddress": HOST,
     }
     print("")
     print(f"Opening Concise Notes Automation at {url}")

@@ -16,7 +16,7 @@
 | Proxy base URL | `https://pw-apps-proxy.vercel.app` |
 | Control sheet (ONE shared sheet for ALL apps) | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
 | Allowed sign-in domain | `pw.live` |
-| Providers already on the proxy (no keys in your app) | Gemini → `gemini_generate` · Mathpix → `mathpix_ocr` · Sarvam TTS → `sarvam_tts` |
+| Providers already on the proxy (no keys in your app) | Gemini → `gemini_generate` · Mathpix → `mathpix_ocr` · Sarvam TTS → `sarvam_tts` · ElevenLabs TTS → `elevenlabs_tts` |
 
 **Your app ships ZERO API keys.** The proxy holds them all.
 
@@ -65,12 +65,21 @@ That's all a human does. Everything below is for the AI.
 2. **Verify registration.** `GET https://pw-apps-proxy.vercel.app/api/apps` and
    confirm `<APP_NAME>` is in the returned list. If it is **not** → STOP and tell
    the human to finish Human Step 1 (exact spelling matters).
-3. **Locate the Google token.** Find where the app obtains the signed-in user's
-   Google token (access token or id token). For a backend, that's its OAuth
-   flow; for a **pure frontend**, use Google Identity Services ("Sign in with
-   Google") in the browser and use the returned credential/id_token. If the app
+3. **Locate the Google token — and wire it as a PROVIDER, not a string.** Find
+   where the app obtains the signed-in user's Google token (access token or id
+   token). For a backend, that's its OAuth flow; for a **pure frontend**, use
+   Google Identity Services ("Sign in with Google") in the browser. If the app
    has no Google sign-in, add one (or ask the human) — a verified `@pw.live`
    token is required.
+
+   **Google tokens expire after ~1 hour**, so do NOT capture the token once at
+   login and reuse the string — any run/session longer than an hour will start
+   failing with 401. Instead pass every `pw_access` call a **token provider**:
+   a zero-arg function that returns a currently-valid token (refreshing via
+   the app's OAuth flow when the cached one is within ~5 min of expiry). Both
+   clients accept a function anywhere they accept a token, call it before each
+   request, and on a 401 refresh once and retry. Reference implementations are
+   in the header comments of `pw_access.py` / `pw_access.js`.
 4. **Add the access gate.** Before *every* paid/main action:
    ```python
    import pw_access
@@ -83,9 +92,11 @@ That's all a human does. Everything below is for the AI.
    - Gemini `generateContent` → `pw_access.gemini_generate(token, model=..., request=<same body>, filename=, input_unit=, count=)`
    - Mathpix `/v3/text` → `pw_access.mathpix_ocr(token, request=<same body>, filename=, count=)`
    - Sarvam `/text-to-speech` → `pw_access.sarvam_tts(token, request=<same body>, filename=, count=)`
+   - ElevenLabs `/v1/text-to-speech/{voice_id}` → `pw_access.elevenlabs_tts(token, voice_id=..., request=<same body>, filename=, count=)`
+     (returns base64 audio in `result["audio_base64"]`, `audio/mpeg`)
 
-   (JS client `pw_access.js`: `geminiGenerate` / `mathpixOcr` / `sarvamTts`,
-   same fields, e.g. `await geminiGenerate(token, { model, request, ... })`.)
+   (JS client `pw_access.js`: `geminiGenerate` / `mathpixOcr` / `sarvamTts` /
+   `elevenLabsTts`, same fields, e.g. `await geminiGenerate(token, { model, request, ... })`.)
 
    **Per-task logging (do this if a task makes MORE THAN ONE AI call):** create
    one `UsageSession` per task, pass `session=` to each call, and `flush()` at
@@ -124,6 +135,11 @@ these so login behaves the same across every PW app:
 - **Domain:** only `@pw.live` accounts (the proxy enforces this too).
 - **Session length: 7 days.** If the app mints its own session token/JWT, set
   its expiry to 7 days (e.g. `timedelta(days=7)`).
+- **Google token ≠ session — it dies after ~1 hour.** The 7-day session is the
+  app's own; the Google token inside it expires after ~1 hour and must be
+  refreshed. Pass `pw_access` a token **provider function** (see AI step 3) so
+  the kit can refresh-and-retry on 401. Never cache the token string for the
+  life of the session — that's the bug that kills runs at the ~50–60 min mark.
 - **Fail closed:** if the allowlist check errors or the network is down → DENY.
 - **Check before every run:** call `check_allowed()` before each paid/main
   action, not just at login (a user can be removed from the sheet mid-session).
@@ -142,4 +158,6 @@ these so login behaves the same across every PW app:
 - [ ] all provider calls go through `pw_access` (no direct provider calls remain)
 - [ ] no API keys left in `.env`, code, or build
 - [ ] session = 7 days; sign-in is `@pw.live`-only and not auto-opened on startup
+- [ ] a **token provider** (function) is passed to `pw_access`, not a token
+      string cached at login — runs longer than 1 hour survive
 - [ ] a real run logged a row to the `Usage Cost` tab

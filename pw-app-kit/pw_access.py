@@ -14,6 +14,23 @@ Every call takes the signed-in user's Google token (the access token or id
 token your app already obtains at login). The proxy verifies it, checks the
 whitelist for APP_NAME, calls the paid API with its own key, logs usage, and
 returns only the result.
+
+IMPORTANT — Google tokens expire after ~1 HOUR (the app session may be 7 days,
+but the Google token inside it is not). For anything that can run longer than
+an hour, pass a TOKEN PROVIDER instead of a raw string: a zero-arg function
+that returns a currently-valid token (refreshing via your OAuth flow when
+needed). Every helper here accepts either. With a provider, the kit fetches a
+token before each request and, on a 401, refreshes once and retries — so long
+runs survive the 1-hour expiry. Example:
+
+    creds = ...  # your google.oauth2.credentials.Credentials from sign-in
+    def google_token():
+        if not creds.valid or (creds.expiry and
+                (creds.expiry - datetime.utcnow()).total_seconds() < 300):
+            creds.refresh(google.auth.transport.requests.Request())
+        return creds.token
+
+    pw_access.gemini_generate(google_token, model=..., request=...)  # note: no ()
 """
 import os
 from typing import Optional, List, Dict, Any
@@ -39,11 +56,40 @@ class PWAccessError(Exception):
     """Raised when a paid proxy call (Gemini/Mathpix) fails."""
 
 
-def _headers(google_token: str) -> Dict[str, str]:
+def _headers(token: str) -> Dict[str, str]:
     return {
-        "Authorization": f"Bearer {google_token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+
+
+def _resolve_token(google_token) -> str:
+    """`google_token` may be a plain string OR a zero-arg callable (a "token
+    provider") that returns a currently-valid token. A provider is what makes
+    runs longer than Google's ~1-hour token lifetime work: it is consulted
+    before every request, and again on a 401 (see _post)."""
+    return google_token() if callable(google_token) else google_token
+
+
+def _post(path: str, google_token, payload: dict, timeout: int):
+    """POST to the proxy. If a token provider (callable) was supplied and the
+    proxy answers 401 — the token aged past ~1 hour mid-run — ask the provider
+    for a fresh token and retry ONCE. Raw string tokens keep the old behavior
+    (no retry possible: the kit has no way to refresh a string)."""
+    r = requests.post(
+        f"{PROXY_BASE_URL}{path}",
+        headers=_headers(_resolve_token(google_token)),
+        json=payload,
+        timeout=timeout,
+    )
+    if r.status_code == 401 and callable(google_token):
+        r = requests.post(
+            f"{PROXY_BASE_URL}{path}",
+            headers=_headers(_resolve_token(google_token)),
+            json=payload,
+            timeout=timeout,
+        )
+    return r
 
 
 def check_allowed(google_token: str, app: str = APP_NAME) -> bool:
@@ -63,12 +109,7 @@ def check_allowed_status(google_token: str, app: str = APP_NAME) -> str:
     if not google_token:
         return "denied"
     try:
-        r = requests.post(
-            f"{PROXY_BASE_URL}/api/allowlist",
-            headers=_headers(google_token),
-            json={"app": app},
-            timeout=_TIMEOUT,
-        )
+        r = _post("/api/allowlist", google_token, {"app": app}, _TIMEOUT)
         if r.status_code == 200:
             return "allowed" if bool(r.json().get("allowed")) else "denied"
         if r.status_code == 403:
@@ -97,18 +138,13 @@ def log_usage(
         "tokens_out": 2300, "cost_inr": 12.45}]
     """
     try:
-        r = requests.post(
-            f"{PROXY_BASE_URL}/api/usage-log",
-            headers=_headers(google_token),
-            json={
-                "app": app,
-                "filename": filename,
-                "input_unit": input_unit,
-                "count": count,
-                "items": items,
-            },
-            timeout=_TIMEOUT,
-        )
+        r = _post("/api/usage-log", google_token, {
+            "app": app,
+            "filename": filename,
+            "input_unit": input_unit,
+            "count": count,
+            "items": items,
+        }, _TIMEOUT)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None
@@ -185,12 +221,7 @@ def _get_vertex(google_token, app=APP_NAME):
     now = time.time()
     if _vertex_cache["token"] and now < _vertex_cache["expiry"] - 600:
         return _vertex_cache
-    r = requests.post(
-        f"{PROXY_BASE_URL}/api/vertex/token",
-        headers=_headers(google_token),
-        json={"app": app},
-        timeout=_TIMEOUT,
-    )
+    r = _post("/api/vertex/token", google_token, {"app": app}, _TIMEOUT)
     if r.status_code != 200:
         raise PWAccessError(f"vertex token error {r.status_code}: {r.text[:300]}")
     d = r.json()
@@ -265,12 +296,7 @@ def mathpix_ocr(
     payload = {"app": app, "request": request, "filename": filename, "count": count}
     if session is not None:
         payload["log"] = False
-    r = requests.post(
-        f"{PROXY_BASE_URL}/api/mathpix/ocr",
-        headers=_headers(google_token),
-        json=payload,
-        timeout=_AI_TIMEOUT,
-    )
+    r = _post("/api/mathpix/ocr", google_token, payload, _AI_TIMEOUT)
     if r.status_code != 200:
         raise PWAccessError(f"mathpix proxy error {r.status_code}: {r.text[:300]}")
     data = r.json()
@@ -297,15 +323,43 @@ def sarvam_tts(
     payload = {"app": app, "request": request, "filename": filename, "count": count}
     if session is not None:
         payload["log"] = False
-    r = requests.post(
-        f"{PROXY_BASE_URL}/api/sarvam/tts",
-        headers=_headers(google_token),
-        json=payload,
-        timeout=_AI_TIMEOUT,
-    )
+    r = _post("/api/sarvam/tts", google_token, payload, _AI_TIMEOUT)
     if r.status_code != 200:
         raise PWAccessError(f"sarvam proxy error {r.status_code}: {r.text[:300]}")
     data = r.json()
     if session is not None:
         _accumulate(session, data, default_model="Sarvam TTS")
+    return data
+
+
+def elevenlabs_tts(
+    google_token,
+    *,
+    voice_id: str,
+    request: dict,
+    output_format: str = "mp3_44100_128",
+    filename: str = "",
+    count: Any = None,
+    app: str = APP_NAME,
+    session: "UsageSession" = None,
+) -> dict:
+    """Call ElevenLabs Text-to-Speech THROUGH the proxy. The proxy holds
+    ELEVENLABS_API_KEY, calls ElevenLabs, logs usage (per character), and
+    returns {"ok": True, "result": {"audio_base64": ..., "content_type":
+    "audio/mpeg", "output_format": ...}, "cost_inr": ...}.
+    `request` is the raw ElevenLabs TTS body: {"text": ..., "model_id":
+    "eleven_multilingual_v2", "voice_settings": {...}}. `voice_id` is the
+    ElevenLabs voice to use. `count` = characters billed; if omitted the proxy
+    derives it from request["text"]. When `session` is given, usage is
+    accumulated and written once by session.flush() instead of logged per call."""
+    payload = {"app": app, "voice_id": voice_id, "request": request,
+               "output_format": output_format, "filename": filename, "count": count}
+    if session is not None:
+        payload["log"] = False
+    r = _post("/api/elevenlabs/tts", google_token, payload, _AI_TIMEOUT)
+    if r.status_code != 200:
+        raise PWAccessError(f"elevenlabs proxy error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if session is not None:
+        _accumulate(session, data, default_model="ElevenLabs TTS")
     return data

@@ -56,7 +56,7 @@ if (existsSync(envPath)) {
     const eq = s.indexOf("=");
     const name = s.slice(0, eq).trim();
     const val = s.slice(eq + 1).trim();
-    if (val && /GEMINI|MATHPIX|SARVAM|OPENAI/i.test(name)) leaked.push(name);
+    if (val && /GEMINI|MATHPIX|SARVAM|ELEVEN|OPENAI/i.test(name)) leaked.push(name);
   }
 }
 if (leaked.length) {

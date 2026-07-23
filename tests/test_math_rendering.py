@@ -128,13 +128,19 @@ def test_repair_acceptance():
 
 def test_repair_chem_units():
     text = ("Chemistry Basics\n"
-            "• Water is H2O and carbon dioxide is CO2.\n"
-            "• Acceleration is m/s2 and a value of 10^-3.\n")
+            "• Water is H2O, carbon dioxide is CO2, and sulfate is SO4^2-.\n"
+            "• Acceleration is m/s2 or m s^-2 and a value of 10^-3.\n"
+            "• Scripts include v0, a_n, and x^2.\n")
     fixed, _ = repair_equations(text)
     check_true("repair H2O", "[[MATH_INLINE: H_2O]]" in fixed, fixed)
     check_true("repair CO2", "[[MATH_INLINE: CO_2]]" in fixed, fixed)
+    check_true("repair SO4 charge", "[[MATH_INLINE: SO_4^{2-}]]" in fixed, fixed)
     check_true("repair m/s2", "[[MATH_INLINE: m\\,s^{-2}]]" in fixed, fixed)
+    check_true("repair m s^-2", fixed.count("[[MATH_INLINE: m\\,s^{-2}]]") == 2, fixed)
     check_true("repair 10^-3", "[[MATH_INLINE: 10^{-3}]]" in fixed, fixed)
+    check_true("repair v0", "[[MATH_INLINE: v_0]]" in fixed, fixed)
+    check_true("repair a_n", "[[MATH_INLINE: a_n]]" in fixed, fixed)
+    check_true("repair x^2", "[[MATH_INLINE: x^2]]" in fixed, fixed)
 
 
 def test_repair_is_conservative():

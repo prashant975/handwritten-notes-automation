@@ -60,7 +60,8 @@ def main():
                 # (KEY/SECRET/TOKEN). Plain config like MODEL_NAME or the legacy
                 # GEMINI_MODEL model-picker must not be flagged.
                 if (val.strip()
-                        and any(p in upper for p in ("GEMINI", "MATHPIX", "SARVAM", "OPENAI"))
+                        and any(p in upper for p in ("GEMINI", "MATHPIX", "SARVAM",
+                                                     "ELEVEN", "OPENAI"))
                         and any(s_ in upper for s_ in ("KEY", "SECRET", "TOKEN"))):
                     leaked.append(name.strip())
     if leaked:
@@ -73,8 +74,10 @@ def main():
     if token:
         status = pw_access.check_allowed_status(token)
         print(f"allowlist check for supplied token: {status}")
-        if status == "error":
-            print("  (token invalid/expired, or proxy unreachable)")
+        if status == "expired":
+            print("  (the Google token is expired or invalid — get a fresh one)")
+        elif status == "error":
+            print("  (proxy unreachable or server error)")
         ok = ok and status in ("allowed", "denied")
 
     print("\nRESULT:", "ALL GOOD" if ok else "ISSUES FOUND")

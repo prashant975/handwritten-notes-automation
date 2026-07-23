@@ -30,6 +30,7 @@ from .math_renderer import (
     split_math_segments,
 )
 from .models import SlideData
+from .slide_filter import unwanted_slide_reason
 
 BODY_FONT = "Kalam"
 BODY_SIZE = Pt(16)
@@ -557,9 +558,16 @@ def write_notes_docx(notes_text: str, output_path: Path, slides: list[SlideData]
             note = parse_dtp_note(line)
             _add_dtp(doc, line, dtp_note_policy)
             if dtp_note_policy in {"keep_note_and_insert_image", "hide_note_insert_image"}:
-                if note and note.slide_no and note.slide_no in slide_map and slide_map[note.slide_no].image_path:
+                matched_slide = slide_map.get(note.slide_no) if note and note.slide_no else None
+                blocked_reason = unwanted_slide_reason(matched_slide, strict=True) if matched_slide else None
+                if blocked_reason:
+                    warnings.append(
+                        f"Skipped image from slide {note.slide_no}: {blocked_reason}. "
+                        "Promotional and question slides are never inserted."
+                    )
+                elif matched_slide and matched_slide.image_path:
                     img, cropped = _pick_dtp_image(
-                        slide_map[note.slide_no], run_dir, region_cache, used_regions
+                        matched_slide, run_dir, region_cache, used_regions
                     )
                     if img is None:
                         warnings.append(

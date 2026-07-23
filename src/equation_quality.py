@@ -25,6 +25,9 @@ _CHEM_RE = re.compile(
     + r")(?![A-Za-z0-9_}])"
 )
 _NEG_POW_RE = re.compile(r"(?<![A-Za-z0-9^_{])([0-9]+|[A-Za-z])\^?\s*-\s*([1-9])(?![0-9}])")
+_POS_POW_RE = re.compile(r"(?<![A-Za-z0-9^_{])([A-Za-z])\^([2-9])(?![0-9}])")
+_V_ZERO_RE = re.compile(r"(?<![A-Za-z0-9_])v0(?![A-Za-z0-9])")
+_SULFATE_RE = re.compile(r"(?<![A-Za-z0-9_])SO4\s*\^\s*2-(?![A-Za-z0-9])", re.I)
 _BARE_EQUATION_RE = re.compile(r"[A-Za-z0-9\)]\s*=\s*[A-Za-z0-9\(\\]")
 _HAS_NOTATION_RE = re.compile(r"[√×÷≤≥≠±∝∫∑→←⇒⇔∂∇°∠⊥]|[A-Za-z0-9]\^|[A-Za-z0-9]_")
 
@@ -71,6 +74,12 @@ def check_equations(notes_text: str) -> dict:
             issues.append(_issue("missing_subscript", n, m.group(1)))
         for m in _NEG_POW_RE.finditer(plain):
             issues.append(_issue("missing_superscript", n, m.group(0)))
+        for m in _POS_POW_RE.finditer(plain):
+            issues.append(_issue("untagged_formula", n, m.group(0)))
+        for m in _V_ZERO_RE.finditer(plain):
+            issues.append(_issue("missing_subscript", n, m.group(0)))
+        for m in _SULFATE_RE.finditer(plain):
+            issues.append(_issue("missing_subscript", n, m.group(0)))
         # A bare "x = y" line carrying notation but no tag.
         if _BARE_EQUATION_RE.search(plain) and _HAS_NOTATION_RE.search(plain):
             issues.append(_issue("untagged_formula", n, plain))

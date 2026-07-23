@@ -1,7 +1,8 @@
 # Add your app to the PW shared proxy — 3 steps (~15 min)
 
-You never touch a service-account key or any Gemini/Mathpix key. They live on
-the proxy. Your app only ever calls the proxy. That's the whole point.
+You never touch a service-account key or any provider key (Gemini / Mathpix /
+Sarvam / ElevenLabs). They live on the proxy. Your app only ever calls the
+proxy. That's the whole point.
 
 **What you need first:** the proxy base URL (e.g. `https://pw-apps-proxy.vercel.app`)
 and your exact `APP_NAME` — the header in row 1 of the `Whitelisted` tab.
@@ -34,6 +35,9 @@ Install the one dependency if you don't have it: `pip install requests`.
 ## Step 3 — Wire it into your app
 
 `google_token` = the signed-in user's Google token your app already has.
+⚠️ Google tokens expire after **~1 hour** — for anything long-running, pass a
+**function** that returns a fresh token instead of the string (every
+`pw_access` helper accepts either; details in the `pw_access.py` header).
 
 **Before every paid/main run — gate on the whitelist (fail closed):**
 ```python

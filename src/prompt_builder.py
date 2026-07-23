@@ -178,6 +178,12 @@ Important automation instructions:
 - Preserve original slide/page numbers in every DTP note.
 - If a slide image is attached and text extraction misses handwritten annotations, read the image and include the instructional annotations.
 - Exclude questions, answer options, QR/ads/homework/thank-you content.
+- NEVER create a Note to DTP for a QR code, social-media panel, phone number,
+  promotion, ASQ/MCQ, question, answer options, or worked solution.
+- A Note to DTP is allowed only for a concept-essential scientific diagram,
+  graph, labelled figure, apparatus, reaction mechanism, or geometric figure.
+- Exclude social handles, phone numbers, calls to scan/follow/subscribe, ASQ/MCQ labels, worked examples, and all question-specific arithmetic.
+- Treat [EQUATION OCR] as a high-accuracy transcription aid. Preserve its mathematical symbols, but never turn question/solution content into notes.
 - If a slide has both instructional content and question boxes, keep only the instructional content.
 - Do not mention that you used AI. Output only the final notes content.{subject_rules}{_language_rule(language_code)}
 {label}

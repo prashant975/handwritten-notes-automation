@@ -56,7 +56,7 @@ def main():
                     continue
                 name, _, val = s.partition("=")
                 if val.strip() and any(k in name.upper()
-                                       for k in ("GEMINI", "MATHPIX", "SARVAM", "OPENAI")):
+                                       for k in ("GEMINI", "MATHPIX", "SARVAM", "ELEVEN", "OPENAI")):
                     leaked.append(name.strip())
     if leaked:
         print(f"FAIL: provider keys still present in {env_path}: {leaked}")

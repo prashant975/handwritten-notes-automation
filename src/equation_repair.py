@@ -39,9 +39,13 @@ _VEC_LETTER_RE = re.compile(r"\b(vectors?)\s+([A-Z])(?![A-Za-z0-9])")
 _AND_LETTER_RE = re.compile(r"\band\s+([A-Z])(?![A-Za-z0-9])")
 # 10^-3, x^-2 (caret + signed number, not already braced)
 _NEG_POW_RE = re.compile(r"(?<![A-Za-z0-9^_])([0-9]+|[A-Za-z])\^(-\s*[0-9]+)(?![0-9}])")
+_POS_POW_RE = re.compile(r"(?<![A-Za-z0-9^_])([A-Za-z])\^([2-9])(?![0-9}])")
+_EXPLICIT_SUB_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z])_([A-Za-z0-9])(?![A-Za-z0-9}])")
+_V_ZERO_RE = re.compile(r"(?<![A-Za-z0-9_])v0(?![A-Za-z0-9])")
+_SULFATE_RE = re.compile(r"(?<![A-Za-z0-9_])SO4\s*\^\s*2-(?![A-Za-z0-9])", re.I)
 # m/s2, m/s^2, ms-2, m s-2  -> m s^{-2}
 _UNIT_PER_RE = re.compile(r"(?<![A-Za-z0-9])([a-zA-Z]{1,4})\s*/\s*([a-zA-Z]{1,3})\s*\^?\s*([2-9])(?![A-Za-z0-9])")
-_UNIT_NEG_RE = re.compile(r"(?<![A-Za-z0-9])(m|km|cm|mol|kg|N|J|W|C|V|A)\s+?(s|L|m|kg)\s*-\s*([1-9])(?![A-Za-z0-9])")
+_UNIT_NEG_RE = re.compile(r"(?<![A-Za-z0-9])(m|km|cm|mol|kg|N|J|W|C|V|A)\s+?(s|L|m|kg)\s*\^?\s*-\s*([1-9])(?![A-Za-z0-9])")
 # Bare chemical formulas from the whitelist (H2O, CO2, H2SO4 ...)
 _CHEM_RE = re.compile(
     r"(?<![A-Za-z0-9_^{])(" + "|".join(re.escape(f) for f in sorted(COMMON_FORMULAS, key=len, reverse=True))
@@ -75,6 +79,32 @@ def _repair_line(line: str, doc_ctx: str) -> tuple[str, list[dict]]:
             out_parts.append(f"[[MATH_{'INLINE' if kind == 'inline' else 'BLOCK'}: {payload}]]")
             continue
         s = payload
+
+        # Repair explicit script syntax before inserting any other tags, so
+        # these regexes never match LaTeX inside a newly-created tag.
+        def _sulfate(m):
+            latex = r"SO_4^{2-}"
+            note("ionic_formula", m.group(0), latex, "sulfate formula written without protected scripts")
+            return _tag(latex)
+        s = _SULFATE_RE.sub(_sulfate, s)
+
+        def _pospow(m):
+            latex = f"{m.group(1)}^{m.group(2)}"
+            note("positive_power", m.group(0), latex, "explicit positive power written without a maths tag")
+            return _tag(latex)
+        s = _POS_POW_RE.sub(_pospow, s)
+
+        def _explicit_sub(m):
+            latex = f"{m.group(1)}_{m.group(2)}"
+            note("explicit_subscript", m.group(0), latex, "explicit subscript written without a maths tag")
+            return _tag(latex)
+        s = _EXPLICIT_SUB_RE.sub(_explicit_sub, s)
+
+        def _vzero(m):
+            latex = "v_0"
+            note("common_subscript", m.group(0), latex, "standard initial-velocity symbol written as v0")
+            return _tag(latex)
+        s = _V_ZERO_RE.sub(_vzero, s)
 
         if unit_ctx:
             def _cyc(m):
@@ -112,13 +142,6 @@ def _repair_line(line: str, doc_ctx: str) -> tuple[str, list[dict]]:
             return _tag(latex)
         s = _CHEM_RE.sub(_chem, s)
 
-        def _negpow(m):
-            base, exp = m.group(1), m.group(2).replace(" ", "")
-            latex = f"{base}^{{{exp}}}"
-            note("negative_power", m.group(0), latex, "negative exponent written inline")
-            return _tag(latex)
-        s = _NEG_POW_RE.sub(_negpow, s)
-
         def _unitper(m):
             a, b, p = m.group(1), m.group(2), m.group(3)
             latex = rf"{a}\,{b}^{{-{p}}}"
@@ -132,6 +155,16 @@ def _repair_line(line: str, doc_ctx: str) -> tuple[str, list[dict]]:
             note("unit_exponent", m.group(0), latex, "unit written with a bare minus exponent")
             return _tag(latex)
         s = _UNIT_NEG_RE.sub(_unitneg, s)
+
+        # Generic negative powers run after compound units, otherwise the
+        # ``s^-2`` portion of ``m s^-2`` would be tagged before the unit rule
+        # could preserve the complete unit.
+        def _negpow(m):
+            base, exp = m.group(1), m.group(2).replace(" ", "")
+            latex = f"{base}^{{{exp}}}"
+            note("negative_power", m.group(0), latex, "negative exponent written inline")
+            return _tag(latex)
+        s = _NEG_POW_RE.sub(_negpow, s)
 
         out_parts.append(s)
     return "".join(out_parts), repairs

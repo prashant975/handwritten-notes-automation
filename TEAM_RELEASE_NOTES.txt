@@ -1,0 +1,50 @@
+HANDWRITTEN NOTES AUTOMATION - TEAM RELEASE
+Build date: 23 July 2026
+
+PROBLEMS SOLVED
+---------------
+1. Mathematical equations now use protected math tags and native Word equations
+   (OMML/Cambria Math) instead of being forced into the Kalam body font.
+
+2. Vector arrows, unit-vector hats, cross products, dot products, fractions,
+   roots, Greek symbols, superscripts and subscripts are preserved.
+
+3. Chemical formulae and scientific units are preserved, including examples
+   such as H2O, CO2, SO4^2-, v0, x^2, 10^-3 and m s^-2.
+
+4. Common broken AI formula output is repaired conservatively before DOCX
+   creation. Repairs and remaining warnings are recorded in equation reports.
+
+5. JEE, NEET and JEE + NEET concise-note modes are available, with strict
+   exam-oriented prompts and removal of repeated or unnecessary teacher talk.
+
+6. QR codes, advertisements, social-media panels, phone-number slides,
+   homework/welcome/thank-you slides, ASQ/MCQ slides, answer options and worked
+   question images are filtered out.
+
+7. Filtered promotional/question slides can no longer re-enter through diagram
+   redraw or a mistaken AI "Note to DTP" request. DOCX insertion performs a
+   final independent safety check.
+
+8. The app provides DOCX, PDF, Equation Quality Report and Full Run ZIP
+   downloads without regenerating the notes when a download button is clicked.
+
+9. PDF export failure no longer prevents the DOCX and reports from being
+   delivered. A clear warning is shown when Word/LibreOffice is unavailable.
+
+10. Authentication/session handling, proxy access checks and usage tracking are
+    included in the packaged team application.
+
+VALIDATION
+----------
+- Automated test suite: 64 passed
+- Packaged Windows executable startup: passed
+- Streamlit health endpoint: OK
+
+TEAM USAGE
+----------
+1. Extract the ZIP completely.
+2. Open the HandwrittenNotesAppTeam folder.
+3. Double-click HandwrittenNotesAppTeam.exe.
+4. Keep the command window open while using the app.
+5. Use http://localhost:8501 and sign in with an authorized @pw.live account.

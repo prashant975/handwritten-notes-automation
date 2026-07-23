@@ -5,7 +5,7 @@ your app**:
 
 - ✅ per-user access control (app-wise whitelist)
 - ✅ automatic usage + cost logging
-- ✅ AI provider calls — **Gemini, Mathpix, Sarvam TTS** — via the proxy
+- ✅ AI provider calls — **Gemini, Mathpix, Sarvam TTS, ElevenLabs TTS** — via the proxy
 
 The proxy holds all the keys. Your app just calls it with the signed-in user's
 Google token. Works for **any app**: local desktop, your own Vercel/Render, or a
@@ -34,13 +34,13 @@ pure frontend/SPA.
 | Proxy URL | `https://pw-apps-proxy.vercel.app` (already inside the client files) |
 | Control sheet | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
 | Allowed sign-in domain | `pw.live` |
-| Providers available | Gemini · Mathpix · Sarvam TTS |
+| Providers available | Gemini · Mathpix · Sarvam TTS · ElevenLabs TTS |
 
 ## Before you start
 - Your app has (or will add) **Google Sign-in** for `@pw.live` users.
 - You can edit the **control sheet** (link above) to register your app.
-- Your app uses **Gemini / Mathpix / Sarvam TTS**. Need another provider
-  (OpenAI, etc.)? Ping the proxy owner — it's a one-time add on the proxy.
+- Your app uses **Gemini / Mathpix / Sarvam TTS / ElevenLabs TTS**. Need another
+  provider (OpenAI, etc.)? Ping the proxy owner — it's a one-time add on the proxy.
 
 ---
 
@@ -63,7 +63,7 @@ Copy the whole **`pw-app-kit`** folder into your app's project.
 ### Step 3 — Tell your AI assistant (copy-paste this prompt)
 Open your AI assistant (Anti-Gravity) **in your app's project** and paste:
 
-> **Onboard this app to the PW proxy following `pw-app-kit/CONNECT-TO-PW-PROXY.md`. My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE". Add the client (`pw_access.py` for a Python backend, or `pw_access.js` for a Node backend / frontend), set APP_NAME, add the access check before every run, route ALL AI calls (Gemini/Mathpix/Sarvam) through the proxy, and — if a task makes more than one AI call — use a `UsageSession` so each provider logs ONE combined row per task. Apply the login & session standards from the doc (7-day session, `@pw.live` only, deny on failure, don't auto-open the browser). Remove any local provider API keys from the code and .env, then run the verification and show me the result.**
+> **Onboard this app to the PW proxy following `pw-app-kit/CONNECT-TO-PW-PROXY.md`. My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE". Add the client (`pw_access.py` for a Python backend, or `pw_access.js` for a Node backend / frontend), set APP_NAME, add the access check before every run, route ALL AI calls (Gemini/Mathpix/Sarvam/ElevenLabs) through the proxy, and — if a task makes more than one AI call — use a `UsageSession` so each provider logs ONE combined row per task. Pass the Google token as a token-provider FUNCTION (not a cached string) so the kit auto-refreshes it — Google tokens die after ~1 hour. Apply the login & session standards from the doc (7-day session, `@pw.live` only, deny on failure, don't auto-open the browser). Remove any local provider API keys from the code and .env, then run the verification and show me the result.**
 
 The AI does the wiring. It will **stop and ask you** only if your app name
 isn't on the sheet yet, or if it uses a provider the proxy doesn't have.
@@ -100,7 +100,8 @@ and safely — it only ever holds the user's *own* Google token, never a key.
 | `403 not authorized for <app>` | Your email isn't in your app's column on the `Whitelisted` tab. Add it. |
 | Your app isn't in `/api/apps` | App-name mismatch — it must match the sheet header **exactly** (spaces, case). |
 | Need OpenAI / another provider | Ask the proxy owner — one-time add on the proxy; then all apps can use it. |
-| App is Node / pure frontend | Use `pw_access.js` (same 4 calls: `checkAllowed`, `geminiGenerate`, `mathpixOcr`, `sarvamTts`). |
+| App is Node / pure frontend | Use `pw_access.js` (same calls: `checkAllowed`, `geminiGenerate`, `mathpixOcr`, `sarvamTts`, `elevenLabsTts`). |
+| Works, then **401s after ~50–60 min** (long runs die mid-way) | The Google token expired — it only lives ~1 hour. Pass a **token-provider function** instead of a cached string; the kit then refreshes + retries automatically. See the header of `pw_access.py` / `pw_access.js`. |
 | Hosted on Vercel/Render/etc. | Works identically — see "Which client + where it calls" above. |
 
 ## The one rule

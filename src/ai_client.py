@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pw_access
 
@@ -82,8 +82,14 @@ _STATUS_RE = re.compile(r"\berror (\d{3})\b")
 
 
 def _status_from_error(e: Exception) -> int | None:
-    """Extract the HTTP status from a PWAccessError message
-    ("vertex gemini error 429: ..." / "vertex token error 401: ...")."""
+    """Extract the HTTP status from a PWAccessError.
+
+    Prefers the structured `status_code` that pw_access now attaches, and falls
+    back to parsing the message ("vertex gemini error 429: ...") so older kit
+    versions and re-raised errors still classify correctly."""
+    status = getattr(e, "status_code", None)
+    if isinstance(status, int):
+        return status
     m = _STATUS_RE.search(str(e))
     return int(m.group(1)) if m else None
 
@@ -226,18 +232,29 @@ class GeminiClient:
 
     def __init__(
         self,
-        google_token: str,
+        google_token: "str | Callable[..., str]",
         model: str = "gemini-2.5-pro",
         *,
         session: "pw_access.UsageSession | None" = None,
     ):
-        self.google_token = (google_token or "").strip()
+        # `google_token` may be a token string OR a provider callable (see
+        # src/pw_auth.token_provider_for). Prefer the callable: a Google
+        # id_token lives ~1 hour, so a batch that takes longer than that would
+        # otherwise die half-way with a 401. The callable is resolved by
+        # pw_access at the moment of each call, and force-renewed once if the
+        # proxy rejects it.
+        self.google_token = google_token if callable(google_token) else (google_token or "").strip()
         self.model = model.strip() or "gemini-2.5-pro"
         self.session = session
         if not self.google_token:
             raise GeminiError(
                 "No Google token available. Sign in with your @pw.live Google "
                 "account before generating notes (the PW proxy needs it)."
+            )
+        if callable(self.google_token) and not str(pw_access._resolve_token(self.google_token) or ""):
+            raise GeminiError(
+                "Your Google sign-in could not be renewed. Click 'Reconnect "
+                "Google' and sign in again, then start the generation."
             )
 
     def _generate_content(self, model: str, body: dict[str, Any], *, expect: str = "text") -> dict[str, Any]:

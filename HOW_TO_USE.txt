@@ -55,9 +55,22 @@ RUN
 SIGN IN
 -------
 1. Click "Continue with Google" and sign in with your @pw.live account.
+   Google asks you to confirm access the first time — say yes. That is what
+   lets the app keep your session alive without asking you to sign in again.
 2. If you see "not authorized for this app", your email hasn't been
    added yet — ask the person who shared this app.
-3. You stay signed in for 7 days.
+3. You stay signed in for 7 DAYS — including after closing and reopening
+   the app. The sidebar shows "Auth status: OK" and how many days are left.
+   You do NOT need to sign out and back in to fix anything.
+
+4. If you ever see "Session expired" or "reconnect needed", click
+   "Reconnect Google" ONCE. Repeatedly signing out and in does not help
+   and is never required.
+
+5. Always open the app at  http://localhost:8501
+   NOT at http://127.0.0.1:8501 — your browser treats those as two
+   different sites, and a sign-in done on one is not recognised on the
+   other. The app now warns you if you land on the wrong address.
 
 
 GENERATE NOTES

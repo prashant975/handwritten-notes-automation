@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
 import pw_access
 
@@ -9,10 +10,11 @@ from .ai_client import GeminiClient, GeminiError, generate_mock_notes
 from .config import DEFAULT_MATH_RENDER_MODE, LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
 from .docx_layout import derive_chapter_title
 from .docx_writer import write_notes_docx
-from .equation_quality import check_equations, warnings_from_report, write_reports
+from .equation_quality_checker import check_equations, warnings_from_report, write_reports
 from .equation_repair import repair_equations
 from .extract_pdf import extract_pdf
 from .extract_pptx import extract_pptx
+from .math_ocr import enrich_math_slides
 from .models import PipelineResult, SlideData
 from .pdf_exporter import export_docx_to_pdf
 from .prompt_builder import build_generation_prompt, build_merge_prompt
@@ -46,7 +48,7 @@ def run_pipeline(
     subject: str,
     language: str,
     mode: str,
-    google_token: str = "",
+    google_token: "str | Callable[..., str]" = "",
     model: str = "gemini-2.5-pro",
     send_images_to_ai: bool = True,
     strict_filter: bool = True,
@@ -62,6 +64,12 @@ def run_pipeline(
     math_render_mode: str = DEFAULT_MATH_RENDER_MODE,
 ) -> PipelineResult:
     input_path = Path(input_path)
+    # Every entry point (Streamlit, CLI, tests, or a future caller) must pass the
+    # proxy gate immediately before a paid task.  Keeping the gate here prevents
+    # a secondary entry point from accidentally bypassing the UI-level check.
+    # check_allowed fails closed for missing tokens, proxy errors, and denials.
+    if not allow_mock and not pw_access.check_allowed(google_token):
+        raise PermissionError("Not authorized for this app.")
     run_dir = ensure_dir(RUNS_DIR / make_run_id("run"))
     warnings: list[str] = []
     raw_notes_path: Path | None = None
@@ -81,8 +89,6 @@ def run_pipeline(
             warnings.append(f"Subject auto-detected as: {subject}")
         write_json(run_dir / "slides_raw.json", [s.__dict__ for s in slides])
         active_slides, filter_report = filter_slides(slides, strict=strict_filter)
-        write_json(run_dir / "filter_report.json", filter_report)
-        write_json(run_dir / "slides_for_ai.json", [s.__dict__ for s in active_slides])
         if not active_slides:
             raise RuntimeError("No slides/pages left after filtering. Disable strict filtering and try again.")
         language_code = LANGUAGE_CODES.get(language, language).lower()
@@ -105,7 +111,19 @@ def run_pipeline(
             input_unit="No. of pages",
             count=active_slide_count,
         )
-        if allow_mock and not google_token:
+        # Mathpix is purpose-built for printed and handwritten equation OCR.
+        # Scan mathematics slides through the PW proxy, then filter again using
+        # the recovered image text before Gemini sees the deck.
+        if subject.strip().lower() == "mathematics" and not (allow_mock and not google_token):
+            warnings.extend(enrich_math_slides(active_slides, google_token, usage_session))
+            active_slides, post_ocr_report = filter_slides(active_slides, strict=strict_filter)
+            filter_report.extend({**entry, "stage": "post_math_ocr"} for entry in post_ocr_report)
+            active_slide_count = len(active_slides)
+            if not active_slides:
+                raise RuntimeError("No instructional slides remained after promotion/question filtering.")
+        write_json(run_dir / "filter_report.json", filter_report)
+        write_json(run_dir / "slides_for_ai.json", [s.__dict__ for s in active_slides])
+        if allow_mock and not google_token:  # a provider callable is truthy -> real run
             notes_text = generate_mock_notes(subject, mode, language_code, len(active_slides))
             partial_notes = [notes_text]
             api_metadata.append({"provider": "mock", "model": "mock"})
@@ -198,7 +216,12 @@ def run_pipeline(
             dtp_slide_nums = {n.slide_no for n in find_dtp_notes(notes_text) if n.slide_no}
             if dtp_slide_nums:
                 redraw_dir = ensure_dir(run_dir / "ai_diagrams")
-                n_redrawn, redraw_warnings = redraw_slides_handwritten(client, slides, dtp_slide_nums, redraw_dir, image_model=image_model)
+                # Only slides that survived the strict content filter may enter
+                # the redraw/insertion path.  The original list contains QR,
+                # promotion and ASQ/MCQ slides for audit purposes only.
+                n_redrawn, redraw_warnings = redraw_slides_handwritten(
+                    client, active_slides, dtp_slide_nums, redraw_dir, image_model=image_model
+                )
                 warnings.extend(redraw_warnings)
                 warnings.append(f"AI-redrew {n_redrawn} diagram image(s) in handwritten style.")
                 api_metadata.append({"provider": "image", "model": image_model, "redrawn": n_redrawn})
@@ -215,12 +238,20 @@ def run_pipeline(
         # Hindi, etc. preserved) + "_Concise_Notes".
         output_stem = preserve_filename(input_path.stem)
         docx_path = output_dir / f"{output_stem}_Concise_Notes.docx"
-        docx_path, docx_warnings = write_notes_docx(notes_text, docx_path, slides, run_dir=run_dir, image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy, subject=subject, chapter_title=chapter_title, math_render_mode=math_render_mode)
+        docx_path, docx_warnings = write_notes_docx(
+            notes_text, docx_path, active_slides, run_dir=run_dir,
+            image_insert_mode=image_insert_mode, dtp_note_policy=dtp_note_policy,
+            subject=subject, chapter_title=chapter_title,
+            math_render_mode=math_render_mode,
+        )
         warnings.extend(docx_warnings)
         pdf_path, pdf_warning = export_docx_to_pdf(docx_path, output_dir)
         if pdf_warning:
             warnings.append(pdf_warning)
-        warnings.extend(quality_check(notes_text, slides, docx_path, pdf_path, send_images_to_ai=send_images_to_ai))
+        warnings.extend(quality_check(
+            notes_text, active_slides, docx_path, pdf_path,
+            send_images_to_ai=send_images_to_ai,
+        ))
         run_metadata = {
             "input_file": str(input_path),
             "copied_input": str(copied_input),
