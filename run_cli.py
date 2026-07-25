@@ -53,7 +53,11 @@ def main():
     parser.add_argument("--no-images", action="store_true", help="Do not send rendered slide images to AI")
     parser.add_argument("--no-strict-filter", action="store_true")
     parser.add_argument("--allow-mock", action="store_true")
-    parser.add_argument("--ai-redraw-diagrams", action="store_true", help="AI-redraw inserted diagrams in handwritten blue-on-white style (extra API quota)")
+    parser.add_argument(
+        "--no-ai-redraw-diagrams",
+        action="store_true",
+        help="Disable the default AI redraw of inserted diagrams.",
+    )
     parser.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL, help="Gemini image model for diagram redraw (honours IMAGE_MODEL_NAME env var)")
     parser.add_argument("--dtp-note-policy", default="hide_note_insert_image", choices=["hide_note_insert_image", "keep_note_and_insert_image", "keep_note_only"], help="hide_note_insert_image removes the yellow DTP note and inserts only the image")
     args = parser.parse_args()
@@ -81,9 +85,10 @@ def main():
         send_images_to_ai=not args.no_images,
         strict_filter=not args.no_strict_filter,
         allow_mock=args.allow_mock,
-        ai_redraw_diagrams=args.ai_redraw_diagrams,
+        ai_redraw_diagrams=not args.no_ai_redraw_diagrams,
         image_model=args.image_model,
         dtp_note_policy=args.dtp_note_policy,
+        retry_callback=print,
     )
 
     if len(inputs) == 1:

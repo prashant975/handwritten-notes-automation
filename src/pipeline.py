@@ -4,8 +4,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+import time
+
 import pw_access
 
+from . import version
 from .ai_client import GeminiClient, GeminiError, generate_mock_notes
 from .config import DEFAULT_MATH_RENDER_MODE, LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
 from .docx_layout import derive_chapter_title
@@ -29,6 +32,34 @@ def _api_call_metadata(resp, **extra) -> dict:
     if getattr(resp, "usage", None):
         metadata.update(resp.usage)
     return metadata
+
+
+def _model_is_pro(model: str) -> bool:
+    return "pro" in (model or "").lower()
+
+
+def _needs_vision(slide, *, processing_mode: str, vision_on: bool) -> bool:
+    """Decide whether THIS slide's image must go to the AI.
+
+    Sending every full-slide image is the biggest avoidable cost. A slide only
+    needs vision when the image actually carries content:
+      * extraction basically failed (empty/tiny text) — needed in ANY mode,
+      * Balanced — only image-dominant slides (little text),
+      * High Quality — every slide image (thorough),
+      * Fast — nothing beyond the failed-extraction case.
+    """
+    if not getattr(slide, "image_path", None):
+        return False
+    text = (slide.prompt_text or "").strip()
+    if len(text) < 40:
+        return True                       # no usable text — the image is the slide
+    if not vision_on:
+        return False
+    if processing_mode == "high_quality":
+        return True
+    if processing_mode == "balanced":
+        return len(text) < 220            # image-dominant slide
+    return False                          # fast mode: text was fine, skip the image
 
 
 def _extract_input(input_path: Path, run_dir: Path) -> tuple[list[SlideData], list[str]]:
@@ -57,12 +88,25 @@ def run_pipeline(
     allow_mock: bool = False,
     image_insert_mode: str = "smart_crop",
     dtp_note_policy: str = "keep_note_and_insert_image",
-    ai_redraw_diagrams: bool = False,
+    ai_redraw_diagrams: bool = True,
     image_model: str = "gemini-2.5-flash-image",
     exam: str = "",
     strict_math: bool = True,
     math_render_mode: str = DEFAULT_MATH_RENDER_MODE,
+    retry_callback: "Callable[[str], None] | None" = None,
+    # --- speed-mode + model routing (see src/model_router.py) ---
+    processing_mode: str = "balanced",
+    notes_model: str | None = None,      # defaults to `model`
+    vision_model: str | None = None,     # defaults to notes_model
+    qc_model: str | None = None,
+    qc_level: str = "basic",             # "off" | "basic" | "strict"
+    routing_summary: dict | None = None,
 ) -> PipelineResult:
+    started = time.monotonic()
+    started_at = version.format_datetime()
+    notes_model = (notes_model or model or "gemini-2.5-pro").strip()
+    vision_model = (vision_model or notes_model).strip()
+    model = notes_model                  # notes model is the primary generation model
     input_path = Path(input_path)
     # Every entry point (Streamlit, CLI, tests, or a future caller) must pass the
     # proxy gate immediately before a paid task.  Keeping the gate here prevents
@@ -102,6 +146,7 @@ def run_pipeline(
         total_slides = len(slides)
         active_slide_count = len(active_slides)
         client = None
+        vision_slide_total = 0
         # One UsageSession per file (=per task). Every Gemini call below is tagged
         # with `session=` so the proxy accumulates their usage and writes ONE
         # combined Gemini row per file to the `Usage Cost` tab on flush().
@@ -129,15 +174,32 @@ def run_pipeline(
             api_metadata.append({"provider": "mock", "model": "mock"})
             usage_session = None
         else:
-            client = GeminiClient(google_token, model=model, session=usage_session)
+            # Notes model handles text chunks; the (possibly different) vision
+            # model handles any chunk carrying slide images. Both share the one
+            # UsageSession so cost still collapses to one row per model.
+            notes_client = GeminiClient(
+                google_token, model=notes_model, session=usage_session,
+                retry_callback=retry_callback,
+            )
+            vision_client = notes_client if vision_model == notes_model else GeminiClient(
+                google_token, model=vision_model, session=usage_session,
+                retry_callback=retry_callback,
+            )
+            client = notes_client        # used by the optional diagram-redraw path
             chunks = list(chunked(active_slides, batch_size))
 
             def _run_chunk(i: int, slide_chunk):
                 prompt = build_generation_prompt(subject, mode, language_code, slide_chunk, chunk_label=f"{i}/{len(chunks)}", exam=exam, strict_math=strict_math)
-                images = [s.image_path for s in slide_chunk if s.image_path] if send_images_to_ai else []
+                # Selective vision: only attach images that actually carry content.
+                vision_slides = [
+                    s for s in slide_chunk
+                    if _needs_vision(s, processing_mode=processing_mode, vision_on=send_images_to_ai)
+                ]
+                images = [s.image_path for s in vision_slides]
+                client = vision_client if images else notes_client
                 resp = client.generate(prompt, images, max_images=max_images_per_call)
                 (run_dir / f"notes_chunk_{i:02d}.txt").write_text(resp.text, encoding="utf-8")
-                return i, resp
+                return i, resp, len(vision_slides)
 
             # Run chunk calls concurrently (they are network-bound). Cap workers to
             # stay clear of rate limits; the client retries transient 429/5xx.
@@ -147,12 +209,13 @@ def run_pipeline(
                 try:
                     for fut in as_completed(futures):
                         try:
-                            i, resp = fut.result()
+                            i, resp, n_vision = fut.result()
                         except GeminiError:
                             raise
                         except Exception as e:
                             raise GeminiError(f"Gemini generation failed: {e}") from e
                         chunk_results[i] = resp
+                        vision_slide_total += n_vision
                 except BaseException:
                     # One chunk failed terminally — abandon the queued chunks so
                     # they don't keep calling (and billing) Gemini pointlessly.
@@ -174,7 +237,7 @@ def run_pipeline(
             else:
                 merge_prompt = build_merge_prompt(subject, mode, language_code, partial_notes, exam=exam, strict_math=strict_math)
                 try:
-                    resp = client.generate(merge_prompt, [], max_images=0)
+                    resp = notes_client.generate(merge_prompt, [], max_images=0)
                     notes_text = resp.text
                     api_metadata.append(_api_call_metadata(resp, chunk="merge"))
                 except Exception as e:
@@ -186,6 +249,9 @@ def run_pipeline(
         # Equation safety net: repair formulas the model left as plain text, then
         # report whatever notation is still missing. Repairs are recorded rather
         # than applied silently.
+        # Equation repair is a correctness step (keeps math notation), so it runs
+        # whenever strict_math is on regardless of QC level. The equation QUALITY
+        # report/warnings are the "QC" part and are skipped when QC is off.
         equation_repairs: list[dict] = []
         if strict_math:
             notes_text, equation_repairs = repair_equations(notes_text)
@@ -194,18 +260,14 @@ def run_pipeline(
                 warnings.append(
                     f"Repaired {len(equation_repairs)} formula(s) that were written as plain text."
                 )
-        equation_report = check_equations(notes_text)
-        write_reports(run_dir, equation_report, equation_repairs)
-        equation_warnings = warnings_from_report(equation_report)
-        warnings.extend(equation_warnings)
-        write_json(run_dir / "run_log.json", {
-            "equation_repairs": equation_repairs,
-            "equation_issues": equation_report.get("issues", []),
-            "tagged_formula_count": equation_report.get("tagged_formula_count", 0),
-            "strict_math": strict_math,
-            "math_render_mode": math_render_mode,
-            "exam": exam,
-        })
+        equation_report = {"tagged_formula_count": 0, "issue_count": 0,
+                           "issues": [], "issues_by_type": {}, "passed": True}
+        equation_warnings: list[str] = []
+        if qc_level != "off":
+            equation_report = check_equations(notes_text)
+            write_reports(run_dir, equation_report, equation_repairs)
+            equation_warnings = warnings_from_report(equation_report)
+            warnings.extend(equation_warnings)
 
         # Optional: AI-redraw the diagrams referenced by DTP notes into handwritten
         # blue-on-white style, then insert those instead of the raw slide crops.
@@ -252,7 +314,38 @@ def run_pipeline(
             notes_text, active_slides, docx_path, pdf_path,
             send_images_to_ai=send_images_to_ai,
         ))
+        # ---- Run summary: version, timing, models used, fallback/pro flags ----
+        routing_summary = routing_summary or {}
+        pro_used = bool(routing_summary.get("pro_used")) or _model_is_pro(notes_model) or _model_is_pro(vision_model)
+        run_summary = {
+            "app_version": version.APP_VERSION,
+            "app_name": version.APP_NAME,
+            "started_at": started_at,
+            "ended_at": version.format_datetime(),
+            "generated_at": version.iso_now(),
+            "total_processing_seconds": round(time.monotonic() - started, 1),
+            "processing_mode": processing_mode,
+            "slides_processed": active_slide_count,
+            "slides_sent_to_vision": vision_slide_total,
+            "notes_model": notes_model,
+            "vision_model": vision_model,
+            "qc_model": (qc_model if qc_level != "off" else None),
+            "qc_level": qc_level,
+            "fallback_used": bool(routing_summary.get("fallback_used")),
+            "pro_used": pro_used,
+            "routing_reasons": routing_summary.get("reasons", []),
+        }
+        write_json(run_dir / "run_log.json", {
+            **run_summary,
+            "strict_math": strict_math,
+            "math_render_mode": math_render_mode,
+            "exam": exam,
+            "equation_repairs": equation_repairs,
+            "equation_issues": equation_report.get("issues", []),
+            "tagged_formula_count": equation_report.get("tagged_formula_count", 0),
+        })
         run_metadata = {
+            "run_summary": run_summary,
             "input_file": str(input_path),
             "copied_input": str(copied_input),
             "subject": subject,

@@ -50,6 +50,11 @@ def _reset():
         pw_auth._COOKIE_TOKENS.clear()
         pw_auth._LAST_EVENT.clear()
     pw_access.set_token_provider(None)
+    # Clear pw_access's process-wide caches so each test starts cold. Both the
+    # 7-day session pass and the Vertex token persist across calls by design, so
+    # without this a pass minted by one test would leak into the next.
+    pw_access._invalidate_session()
+    pw_access._invalidate_vertex()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +185,11 @@ def test_proxy_401_triggers_exactly_one_retry_with_a_fresh_token():
 
     def fake_post(url, headers=None, json=None, timeout=None, **kw):
         token = headers["Authorization"].split(" ", 1)[1]
-        seen_tokens.append(token)
+        # Record only the allowlist calls: the session-pass mint (POST
+        # /api/session) rides the same refresh-on-401 path and is incidental to
+        # what this test asserts (that the allowlist call refreshes and retries).
+        if url.endswith("/api/allowlist"):
+            seen_tokens.append(token)
         if token == "stale-token":
             return _FakeResponse(401, {"error": "invalid or expired token"})
         return _FakeResponse(200, {"allowed": True})
@@ -200,13 +209,15 @@ def test_proxy_401_triggers_exactly_one_retry_with_a_fresh_token():
 def test_persistent_401_returns_expired_without_looping():
     _reset()
     attempts = {"n": 0}
-    tokens = iter(["t1", "t2", "t3", "t4"])
+    tokens = iter(["t1", "t2", "t3", "t4", "t5", "t6"])
 
     def provider(force=False):
         return next(tokens)
 
     def fake_post(url, headers=None, json=None, timeout=None, **kw):
-        attempts["n"] += 1
+        # Count only the allowlist calls; the session-pass mint POSTs are separate.
+        if url.endswith("/api/allowlist"):
+            attempts["n"] += 1
         return _FakeResponse(401, {"error": "invalid or expired token"})
 
     original = pw_access.requests.post
@@ -217,7 +228,7 @@ def test_persistent_401_returns_expired_without_looping():
         pw_access.requests.post = original
 
     assert status == "expired"
-    assert attempts["n"] == 2, f"expected exactly 1 retry, got {attempts['n']} calls"
+    assert attempts["n"] == 2, f"expected exactly 1 retry, got {attempts['n']} allowlist calls"
     print("PASS: a persistent 401 stops after one retry — no infinite loop")
 
 
@@ -227,7 +238,9 @@ def test_no_retry_when_refreshed_token_is_identical():
     attempts = {"n": 0}
 
     def fake_post(url, headers=None, json=None, timeout=None, **kw):
-        attempts["n"] += 1
+        # Count only the allowlist calls; the session-pass mint POSTs are separate.
+        if url.endswith("/api/allowlist"):
+            attempts["n"] += 1
         return _FakeResponse(401, {})
 
     original = pw_access.requests.post
@@ -378,6 +391,8 @@ def test_scenario_one_hour_later_the_user_is_not_asked_to_log_in_again():
             return _FakeResponse(
                 200, {"id_token": renewed, "access_token": "at", "expires_in": 3600})
         token = headers["Authorization"].split(" ", 1)[1]
+        # Record EVERY proxy endpoint (the session-pass mint and the allowlist
+        # call), so the test still proves the dead token reaches NONE of them.
         proxy_tokens.append(token)
         # The real proxy rejects anything expired.
         if "hour-old" in token:
@@ -395,7 +410,7 @@ def test_scenario_one_hour_later_the_user_is_not_asked_to_log_in_again():
 
     assert status == "allowed", "the user must NOT be asked to sign in again"
     assert google_calls["n"] == 1, "exactly one silent refresh"
-    assert proxy_tokens == [renewed], (
+    assert proxy_tokens and set(proxy_tokens) == {renewed}, (
         "the dead token must never reach the proxy — refresh happens before the call")
 
     final = pw_auth.auth_status(EMAIL)

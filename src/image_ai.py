@@ -19,11 +19,12 @@ HANDWRITTEN_PROMPT = (
 )
 
 
-def redraw_diagram_handwritten(client, image_path: Path, out_dir: Path, *, image_model: str = "gemini-2.5-flash-image", transparent_bg: bool = True) -> Path | None:
+def redraw_diagram_handwritten(client, image_path: Path, out_dir: Path, *, image_model: str = "gemini-2.5-flash-image", transparent_bg: bool = False) -> Path | None:
     """Redraw one diagram via AI. Returns the new image path, or None on failure.
 
-    When transparent_bg is True the white background is made transparent so the
-    PW watermark shows through the inserted diagram.
+    White is kept as the default background because the generation prompt
+    explicitly requires a clean white note image. ``transparent_bg`` remains
+    available only for callers that deliberately want watermark show-through.
     """
     image_path = Path(image_path)
     if not image_path.exists():

@@ -15,20 +15,26 @@ token your app already obtains at login). The proxy verifies it, checks the
 whitelist for APP_NAME, calls the paid API with its own key, logs usage, and
 returns only the result.
 
-Gemini uses Vertex routing (new PW kit): gemini_generate fetches a short-lived
-Vertex token from the proxy and calls Vertex AI directly, so there is no ~4.5 MB
-proxy body limit (this app sends large PDFs/page images inline).
+SESSIONS — sign in once, stay signed in for 7 days. Google's own tokens die
+after ~1 hour, so the kit exchanges the Google token from login for a
+proxy-issued 7-DAY SESSION PASS (POST /api/session) and sends the pass on every
+call. Runs no longer drop mid-way from a token expiring; the only interruption a
+user sees is a fresh Google login after 7 days. The exchange, caching and 401
+retry all happen inside this file — apps keep passing their Google token.
 
-IMPORTANT — Google tokens expire after ~1 HOUR (the app session may be 7 days,
-but the Google token inside it is not). For anything that can run longer than
-an hour, pass a TOKEN PROVIDER instead of a raw string: a callable that returns
-a currently-valid token. Every helper here accepts either. With a provider, the
-kit fetches a token before each request and, on a 401, refreshes once and
-retries — so long runs survive the 1-hour expiry. This app's provider is
+Gemini uses Vertex routing: gemini_generate fetches a short-lived Vertex token
+from the proxy and calls Vertex AI directly, so there is no ~4.5 MB proxy body
+limit (this app sends large PDFs/page images inline). Capacity chokes (429/503)
+are ridden out automatically across fallback regions (_VERTEX_FALLBACK_LOCATIONS).
+
+IMPORTANT — for anything that can run longer than an hour, pass a TOKEN PROVIDER
+instead of a raw string: a callable that returns a currently-valid Google token.
+Every helper here accepts either. This app's provider is
 `src.pw_auth.token_provider_for(email)`.
 
 --------------------------------------------------------------------------
-KIT SYNC NOTE — synced with pw-app-kit 2026-07-22 (adds elevenlabs_tts).
+KIT SYNC NOTE — synced with pw-app-kit 2026-07-22 (adds /api/session 7-day
+session pass + _VERTEX_FALLBACK_LOCATIONS regional fallback).
 This file INTENTIONALLY diverges from the kit template. Re-apply ALL of the
 following on any future kit sync, or this app breaks:
 
@@ -36,20 +42,22 @@ following on any future kit sync, or this app breaks:
   2. proxy_base_url()     — resolved at CALL time, not import time, so a
                             PW_PROXY_BASE_URL set by a late load_dotenv is
                             honoured (src.config imports after pw_access here).
-  3. threading.Lock       — UsageSession and the Vertex cache are lock-guarded:
-                            this app fans chunk calls across a ThreadPoolExecutor,
-                            and the template's unguarded dict loses usage rows.
+  3. threading.Lock       — UsageSession, the session-pass cache and the Vertex
+                            cache are lock-guarded: this app fans chunk calls
+                            across a ThreadPoolExecutor, and the template's
+                            unguarded dicts lose usage rows / double-mint.
   4. PWAccessError.status_code — structured HTTP status, read by
                             src/ai_client._status_from_error for retry decisions.
   5. check_allowed_status → "expired" on 401, distinct from "error", so the UI
                             can say "session expired" vs "proxy unreachable".
-  6. _post() force-refresh — the 401 retry force-renews the token and only
-                            retries when it actually CHANGED (the template
-                            re-calls the provider, which may return the same
-                            cached string and buy a second identical 401).
+  6. _post() force-refresh — the 401 retry force-mints a NEW session pass (and
+                            force-refreshes the Google token behind it) and only
+                            retries when the credential actually CHANGED (else it
+                            just buys a second identical 401).
   7. Vertex 401 handling  — _invalidate_vertex() + _get_vertex(force=True) so a
                             Vertex token that dies early is replaced, not replayed.
   8. set_token_provider() — process-wide fallback for bare-string callers.
+  9. gemini_generate(timeout=) — per-call timeout, passed by src/ai_client.
 --------------------------------------------------------------------------
 """
 import os
@@ -62,7 +70,7 @@ import requests
 # returning a currently-valid token (see `src/pw_auth.token_provider_for`).
 # Passing the callable is strongly preferred: it lets a long run resolve a
 # FRESH token per call instead of reusing whatever was valid when it started,
-# and it lets this module retry once with a renewed token after a 401.
+# and it lets this module mint a new session pass after a 401.
 TokenLike = Union[str, Callable[..., str]]
 
 # --------------------------------------------------------------------------
@@ -104,13 +112,13 @@ def _headers(google_token: str) -> Dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# Token resolution + single-retry-on-401
+# Token resolution + session pass + single-retry-on-401
 #
-# A Google id_token lives ~1 hour. Anything that holds one for longer than that
-# (a long batch, a download click an hour later) WILL see a 401 from the proxy.
-# Resolving the token per call — and retrying exactly once with a force-renewed
-# token after a 401 — is what makes those 401s self-healing instead of a dead
-# end. Exactly one retry: never an infinite loop.
+# A Google id_token lives ~1 hour; the proxy-issued session pass lives 7 days.
+# Anything that holds a credential longer than its life (a long batch, a
+# download click an hour later) WILL see a 401. Minting a pass per process — and
+# retrying exactly once with a force-minted pass after a 401 — is what makes
+# those 401s self-healing instead of a dead end. Exactly one retry: never a loop.
 # --------------------------------------------------------------------------
 _token_provider: Optional[Callable[..., str]] = None
 
@@ -155,26 +163,73 @@ def _resolve_token(google_token: TokenLike, *, force: bool = False) -> str:
     return str(google_token or "").strip()
 
 
+# The proxy-issued 7-day session pass, cached per process and lock-guarded so
+# concurrent chunk calls mint it at most once. All calls ride on the pass, so
+# Google's ~1-hour token expiry cannot interrupt a run.
+_session = {"token": "", "expiry": 0.0}
+_session_lock = threading.Lock()
+
+
+def _invalidate_session():
+    """Drop the cached session pass so the next call mints a fresh one."""
+    with _session_lock:
+        _session.update({"token": "", "expiry": 0.0})
+
+
+def _auth_token(google_token: TokenLike, *, force_new: bool = False) -> str:
+    """Return the credential to send on proxy calls: the cached 7-day session
+    pass when it's still valid, else exchange the resolved Google token for a
+    fresh pass via POST /api/session. If the proxy has no /api/session (older
+    deploy) or the exchange fails, gracefully fall back to sending the Google
+    token — every endpoint accepts both. `force_new` also force-refreshes the
+    Google token behind the pass (used by the post-401 retry)."""
+    import time
+    if not force_new:
+        with _session_lock:
+            if _session["token"] and time.time() < _session["expiry"] - 60:
+                return _session["token"]
+    g = _resolve_token(google_token, force=force_new)
+    if not g:
+        return ""
+    try:
+        r = requests.post(f"{proxy_base_url()}/api/session",
+                          headers=_headers(g), json={}, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            tok = (r.json().get("session_token") or "")
+            if tok:
+                with _session_lock:
+                    _session["token"] = tok
+                    _session["expiry"] = float(r.json().get("expires_at_ms") or 0) / 1000.0
+                return tok
+    except Exception:
+        pass  # network blip / no sessions — fall back to the Google token
+    return g
+
+
 def _post(path: str, google_token: TokenLike, payload: dict, timeout: int):
-    """POST to the proxy, retrying ONCE with a freshly minted token on 401.
+    """POST to the proxy on the 7-day session pass (minted automatically from
+    the app's Google token), retrying ONCE with a freshly minted pass on 401.
 
     Returns the final `requests.Response`, or None when the proxy is
-    unreachable. The retry is attempted only when the renewed token actually
-    differs from the one that was rejected — otherwise it would just buy a
-    second identical 401.
+    unreachable. The retry is attempted only when the renewed credential
+    actually differs from the one that was rejected — otherwise it would just
+    buy a second identical 401.
     """
-    token = _resolve_token(google_token)
+    cred = _auth_token(google_token)
     url = f"{proxy_base_url()}{path}"
     try:
-        r = requests.post(url, headers=_headers(token), json=payload, timeout=timeout)
+        r = requests.post(url, headers=_headers(cred), json=payload, timeout=timeout)
     except Exception:
         return None
 
     if r.status_code != 401:
         return r
 
-    fresh = _resolve_token(google_token, force=True)
-    if not fresh or fresh == token:
+    # Pass expired/rejected: force-mint a fresh one (which also force-refreshes
+    # the Google token behind it) and retry once, only if the credential moved.
+    _invalidate_session()
+    fresh = _auth_token(google_token, force_new=True)
+    if not fresh or fresh == cred:
         return r
     try:
         retried = requests.post(url, headers=_headers(fresh), json=payload, timeout=timeout)
@@ -215,7 +270,7 @@ def check_allowed_status(google_token: TokenLike, app: str = APP_NAME) -> str:
     if r.status_code == 403:
         return "denied"
     if r.status_code == 401:
-        # Survived the refresh-and-retry above, so the sign-in is genuinely dead.
+        # Survived the mint-and-retry above, so the sign-in is genuinely dead.
         return "expired"
     return "error"  # 5xx/etc — can't be sure
 
@@ -227,6 +282,7 @@ def log_usage(
     input_unit: str,
     count: Any,
     items: List[Dict[str, Any]],
+    video_duration: str = "",
     app: str = APP_NAME,
 ) -> Optional[dict]:
     """Append one usage row PER item to the `Usage Cost` tab. Use this only
@@ -248,6 +304,7 @@ def log_usage(
                 "input_unit": input_unit,
                 "count": count,
                 "items": items,
+                "video_duration": video_duration,
             },
             _TIMEOUT,
         )
@@ -282,11 +339,15 @@ class UsageSession:
     and still accumulate into a single session safely.
     """
 
-    def __init__(self, google_token, *, filename="", input_unit="", count=None, app=APP_NAME):
+    def __init__(
+        self, google_token, *, filename="", input_unit="", count=None,
+        video_duration="", app=APP_NAME
+    ):
         self.token = google_token
         self.filename = filename
         self.input_unit = input_unit
         self.count = count
+        self.video_duration = video_duration
         self.app = app
         self._by_model = {}  # model -> {tokens_in, tokens_out, cost_inr, cost_known, requests}
         self._lock = threading.Lock()
@@ -320,7 +381,8 @@ class UsageSession:
         if not items:
             return None
         return log_usage(self.token, filename=self.filename, input_unit=self.input_unit,
-                         count=self.count, items=items, app=self.app)
+                         count=self.count, items=items,
+                         video_duration=self.video_duration, app=self.app)
 
 
 # Vertex token cache. The SA token is identical for every user (it authenticates
@@ -344,9 +406,9 @@ def _get_vertex(google_token: TokenLike, app=APP_NAME, *, force=False):
     ~10 min before expiry. Guarded by a lock so concurrent chunk calls don't
     each trigger a separate token fetch.
 
-    `_post` renews the USER's Google token and retries once if the proxy
-    rejects it with 401, so a batch that outlives the user's ~1h sign-in keeps
-    running instead of failing half-way."""
+    `_post` renews the credential and retries once if the proxy rejects it with
+    401, so a batch that outlives the user's ~1h sign-in keeps running instead
+    of failing half-way."""
     import time
     with _vertex_lock:
         now = time.time()
@@ -361,13 +423,76 @@ def _get_vertex(google_token: TokenLike, app=APP_NAME, *, force=False):
                 status_code=r.status_code,
             )
         d = r.json()
+        project = str(d.get("project") or "").strip()
+        location = str(d.get("location") or "").strip()
+        if not project or not location:
+            raise PWAccessError(
+                "Vertex AI configuration is incomplete: the proxy did not "
+                "provide both project ID and location.",
+                status_code=400,
+            )
         _vertex_cache.update({
             "token": d.get("token", ""),
-            "project": d.get("project", ""),
-            "location": d.get("location", "global"),
+            "project": project,
+            "location": location,
             "expiry": now + int(d.get("expires_in", 3300)),
         })
         return dict(_vertex_cache)
+
+
+# Gemini (especially 2.5-pro) intermittently answers 429 RESOURCE_EXHAUSTED for
+# a few minutes — shared-capacity throttling, NOT something the app did. Plan:
+# retry the primary location after a short wait, then try other regions
+# (separate capacity pools), then one last patient retry. Only 429/503 are
+# retried here; real errors surface immediately (and a 401 propagates so
+# gemini_generate can re-mint the Vertex token). src/ai_client adds its own
+# outer backoff on top of this.
+_VERTEX_FALLBACK_LOCATIONS = ["us-central1", "europe-west4"]
+
+
+def _vertex_url(project: str, location: str, model: str) -> str:
+    host = ("aiplatform.googleapis.com" if location == "global"
+            else f"{location}-aiplatform.googleapis.com")
+    return (f"https://{host}/v1/projects/{project}/locations/{location}"
+            f"/publishers/google/models/{model}:generateContent")
+
+
+def _vertex_generate(v: dict, model: str, request: dict, timeout: float | None = None) -> dict:
+    """Call Vertex generateContent, riding out 429/503 with short waits and
+    regional fallback. Raises PWAccessError(status_code=...) on any real error
+    (including 401, so the caller can re-mint the Vertex token)."""
+    import time
+    primary = v["location"]
+    attempts = [(primary, 0), (primary, 8)]
+    attempts += [(l, 0) for l in _VERTEX_FALLBACK_LOCATIONS if l != primary]
+    attempts += [(primary, 30)]
+    last_text = ""
+    for loc, wait in attempts:
+        if wait:
+            time.sleep(wait)
+        r = requests.post(
+            _vertex_url(v["project"], loc, model),
+            headers={"Authorization": f"Bearer {v['token']}",
+                     "Content-Type": "application/json"},
+            json=request,
+            timeout=timeout or _AI_TIMEOUT,
+        )
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 404 and loc != primary:
+            last_text = r.text  # model not hosted in this region — try the next
+            continue
+        if r.status_code not in (429, 503):
+            raise PWAccessError(
+                f"vertex gemini error {r.status_code}: {r.text[:300]}",
+                status_code=r.status_code,
+            )
+        last_text = r.text
+    raise PWAccessError(
+        f"vertex gemini busy (429) — retried {len(attempts)} times across "
+        f"{sorted(set(l for l, _ in attempts))}: {last_text[:200]}",
+        status_code=429,
+    )
 
 
 def gemini_generate(
@@ -378,8 +503,10 @@ def gemini_generate(
     filename: str = "",
     input_unit: str = "",
     count: Any = None,
+    video_duration: str = "",
     app: str = APP_NAME,
     session: "UsageSession" = None,
+    timeout: float | None = None,
 ) -> dict:
     """Call Gemini via Vertex AI. Fetches a short-lived Vertex token from the
     proxy (cached), then calls Vertex DIRECTLY — so there is NO 4.5 MB proxy body
@@ -388,33 +515,20 @@ def gemini_generate(
          "model": ..., "usage": {...}, "cost_inr": None}
     `result` has the same shape as the Gemini API, so existing parsing is
     unchanged. Cost is computed by the proxy when the usage row is written.
-    When `session` is given, usage is added to it and written by session.flush()."""
-    def _call(vertex):
-        host = ("aiplatform.googleapis.com" if vertex["location"] == "global"
-                else f"{vertex['location']}-aiplatform.googleapis.com")
-        url = (f"https://{host}/v1/projects/{vertex['project']}/locations/{vertex['location']}"
-               f"/publishers/google/models/{model}:generateContent")
-        return requests.post(
-            url,
-            headers={"Authorization": f"Bearer {vertex['token']}",
-                     "Content-Type": "application/json"},
-            json=request,
-            timeout=_AI_TIMEOUT,
-        )
-
+    When `session` is given, usage is added to it and written by session.flush().
+    Capacity chokes (429/503) are ridden out automatically: short-wait retries
+    plus regional fallback (see _vertex_generate)."""
     v = _get_vertex(google_token, app)
-    r = _call(v)
-    if r.status_code == 401:
-        # The Vertex token died (expired early / proxy rotated its SA). Drop it,
-        # mint one more, and retry EXACTLY once — never a loop.
-        _invalidate_vertex()
-        r = _call(_get_vertex(google_token, app, force=True))
-    if r.status_code != 200:
-        raise PWAccessError(
-            f"vertex gemini error {r.status_code}: {r.text[:300]}",
-            status_code=r.status_code,
-        )
-    data = r.json()
+    try:
+        data = _vertex_generate(v, model, request, timeout)
+    except PWAccessError as e:
+        if e.status_code == 401:
+            # The Vertex token died (expired early / proxy rotated its SA). Drop
+            # it, mint one more, and retry EXACTLY once — never a loop.
+            _invalidate_vertex()
+            data = _vertex_generate(_get_vertex(google_token, app, force=True), model, request, timeout)
+        else:
+            raise
     um = data.get("usageMetadata") or {}
     tin = int(um.get("promptTokenCount") or 0)
     tout = int((um.get("candidatesTokenCount") or 0) + (um.get("thoughtsTokenCount") or 0))
@@ -423,7 +537,7 @@ def gemini_generate(
     else:
         log_usage(google_token, filename=filename, input_unit=input_unit, count=count,
                   items=[{"model": model, "tokens_in": tin, "tokens_out": tout, "requests": 1}],
-                  app=app)
+                  video_duration=video_duration, app=app)
     return {"ok": True, "result": data, "model": model,
             "usage": {"tokens_in": tin, "tokens_out": tout}, "cost_inr": None}
 
@@ -434,6 +548,7 @@ def mathpix_ocr(
     request: dict,
     filename: str = "",
     count: Any = 1,
+    video_duration: str = "",
     app: str = APP_NAME,
     session: "UsageSession" = None,
 ) -> dict:
@@ -441,7 +556,10 @@ def mathpix_ocr(
     Mathpix, logs usage, and returns {"ok": True, "result": <mathpix response>,
     "cost_inr": ...}. When `session` is given, usage is accumulated and written
     once by session.flush() instead of logged per call."""
-    payload = {"app": app, "request": request, "filename": filename, "count": count}
+    payload = {
+        "app": app, "request": request, "filename": filename, "count": count,
+        "video_duration": video_duration,
+    }
     if session is not None:
         payload["log"] = False
     r = _post("/api/mathpix/ocr", google_token, payload, _AI_TIMEOUT)
@@ -464,6 +582,7 @@ def sarvam_tts(
     request: dict,
     filename: str = "",
     count: Any = None,
+    video_duration: str = "",
     app: str = APP_NAME,
     session: "UsageSession" = None,
 ) -> dict:
@@ -473,7 +592,10 @@ def sarvam_tts(
     `count` = characters billed; if omitted the proxy derives it from the text.
     When `session` is given, usage is accumulated and written once by
     session.flush() instead of logged per call."""
-    payload = {"app": app, "request": request, "filename": filename, "count": count}
+    payload = {
+        "app": app, "request": request, "filename": filename, "count": count,
+        "video_duration": video_duration,
+    }
     if session is not None:
         payload["log"] = False
     r = _post("/api/sarvam/tts", google_token, payload, _AI_TIMEOUT)
@@ -498,6 +620,7 @@ def elevenlabs_tts(
     output_format: str = "mp3_44100_128",
     filename: str = "",
     count: Any = None,
+    video_duration: str = "",
     app: str = APP_NAME,
     session: "UsageSession" = None,
 ) -> dict:
@@ -514,7 +637,8 @@ def elevenlabs_tts(
     This app generates notes, not audio, so nothing calls this today — it is
     kept at kit parity so a future kit sync stays a clean diff."""
     payload = {"app": app, "voice_id": voice_id, "request": request,
-               "output_format": output_format, "filename": filename, "count": count}
+               "output_format": output_format, "filename": filename, "count": count,
+               "video_duration": video_duration}
     if session is not None:
         payload["log"] = False
     r = _post("/api/elevenlabs/tts", google_token, payload, _AI_TIMEOUT)

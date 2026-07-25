@@ -11,7 +11,9 @@ from urllib.parse import urlparse
 import streamlit as st
 
 import pw_access
+from src import model_router as mr
 from src import pw_auth
+from src import version
 from src.ai_client import GeminiClient, GeminiError
 from src.config import (
     APP_NAME,
@@ -20,8 +22,11 @@ from src.config import (
     DEFAULT_IMAGE_MODEL,
     DEFAULT_MATH_RENDER_MODE,
     DEFAULT_MODEL,
+    DEFAULT_PROCESSING_MODE,
     EXAMS,
     MATH_RENDER_MODES,
+    MODEL_ROUTING_MODE,
+    PROCESSING_MODES,
     SUBJECTS,
 )
 from src.pipeline import run_pipeline
@@ -884,6 +889,66 @@ if LOGO_PATH.exists():
     logo_data = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
     logo_html = f'<img class="app-brand-logo" src="data:image/png;base64,{logo_data}" alt="PW logo">'
 
+def _model_probe():
+    """A health probe bound to the signed-in user's token provider."""
+    return mr.make_probe(_token_provider())
+
+
+def _refresh_model_health(force: bool = True) -> None:
+    cfg = mr.load_routing_config()
+    try:
+        mr.check_models(cfg.all_models(), _model_probe(), cfg, force=force)
+    except Exception as exc:  # never let a health check break the page
+        st.warning(f"Couldn't check model availability: {exc}")
+
+
+def _manual_overrides() -> dict:
+    """Task->model overrides when 'auto' is off (empty dict when auto/unset)."""
+    if st.session_state.get("model_auto", MODEL_ROUTING_MODE != "manual"):
+        return {}
+    return {
+        task: st.session_state.get(f"manual_{task}")
+        for task in ("notes", "vision", "qc")
+        if st.session_state.get(f"manual_{task}")
+    }
+
+
+def _render_model_panel() -> None:
+    """Model Availability status table + Refresh + auto/manual selection."""
+    cfg = mr.load_routing_config()
+    st.markdown("### Model Availability")
+    st.toggle(
+        "Use recommended model automatically",
+        value=st.session_state.get("model_auto", MODEL_ROUTING_MODE != "manual"),
+        key="model_auto",
+        help="ON = the app picks the best available model per task. OFF = choose models yourself below.",
+    )
+    cached = mr.peek_health(cfg.all_models())
+    display = [
+        {"Model": r["model"], "Status": r["status"], "Latency": r["latency"],
+         "Cost": r["cost"], "Used For": r["used_for"]}
+        for r in mr.status_rows(cfg, cached)
+    ]
+    st.table(display)
+    age = mr.cache_age_seconds()
+    if age is None:
+        st.caption("Not checked yet — click Refresh (also runs automatically on first generate).")
+    else:
+        mins = int(age // 60)
+        st.caption(f"Checked {'just now' if mins == 0 else f'{mins} min ago'} · cached {cfg.health_cache_minutes} min.")
+    if st.button("Refresh Model Availability", key="refresh_models", use_container_width=True):
+        with st.spinner("Checking model availability…"):
+            _refresh_model_health(force=True)
+        st.rerun()
+    if not st.session_state.get("model_auto", MODEL_ROUTING_MODE != "manual"):
+        with st.expander("Manual model selection (advanced)"):
+            models = cfg.all_models()
+            for task, label in (("notes", "Notes model"), ("vision", "Vision model"), ("qc", "QC model")):
+                st.selectbox(label, models, key=f"manual_{task}",
+                             index=models.index(st.session_state[f"manual_{task}"])
+                             if st.session_state.get(f"manual_{task}") in models else 0)
+
+
 with st.sidebar:
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width=92)
@@ -926,17 +991,30 @@ with st.sidebar:
                 st.success(f"Gemini OK — {resp.model} via {resp.provider}.")
             except Exception as exc:
                 st.error(f"Gemini test failed: {exc}")
+    st.divider()
+    # Model routing is backend-controlled. The availability panel (status table,
+    # manual override, refresh) is developer-only — hidden from end users, shown
+    # with DEBUG=true or ?debug=1 for troubleshooting.
+    if _developer_mode():
+        _render_model_panel()
     _render_auth_debug_panel()
-    st.caption(f"Build {APP_VERSION}")
+    st.caption(f"Build {APP_VERSION} · {version.APP_NAME} {version.APP_VERSION}")
 
+# Dynamic identity line (recomputed every rerun, so it reflects the load time).
+_now = version.now()
 st.markdown(
     f"""
     <div class="app-header">
         <div class="app-brand">
             {logo_html.replace("app-brand-logo", "app-logo")}
             <div>
-                <div class="app-title">Concise Notes Automation</div>
+                <div class="app-title">{version.APP_NAME}</div>
                 <div class="app-subtitle">Upload a PDF or PowerPoint and download generated notes.</div>
+                <div class="app-subtitle">
+                    Version: <b>{version.APP_VERSION}</b> &nbsp;·&nbsp;
+                    Date: <b>{version.format_date(_now)}</b> &nbsp;·&nbsp;
+                    Time: <b>{version.format_time(_now)}</b>
+                </div>
             </div>
         </div>
         <div class="user-box">Signed in as<b>{user_email}</b></div>
@@ -985,6 +1063,7 @@ def _result_to_dict(name: str, result) -> dict:
         "equation_repairs": (result.metadata or {}).get("equation_repairs", 0),
         "equation_issues": (result.metadata or {}).get("equation_issues", 0),
         "tagged_formula_count": (result.metadata or {}).get("tagged_formula_count", 0),
+        "run_summary": (result.metadata or {}).get("run_summary") or {},
         "error": None,
     }
 
@@ -1126,6 +1205,22 @@ with st.container(border=True):
             ),
         )
 
+    # Processing mode, image analysis and model routing are controlled entirely
+    # from the BACKEND (PROCESSING_MODE env / config defaults) — no end-user
+    # widgets. The health check + model routing still run silently at generate
+    # time; this just resolves the mode the backend selected.
+    PROCESSING_MODE = DEFAULT_PROCESSING_MODE
+    AUTO_SELECTED = PROCESSING_MODE == "auto"
+    if AUTO_SELECTED:
+        _cfg_preview = mr.load_routing_config()
+        _preview_health = mr.peek_health(_cfg_preview.all_models())
+        _effective_mode = (mr.recommend_mode(_cfg_preview, _preview_health)[0]
+                           if _preview_health else mr.DEFAULT_MODE)
+    else:
+        _effective_mode = PROCESSING_MODE if PROCESSING_MODE in mr.MODE_PROFILES else mr.DEFAULT_MODE
+    _profile = mr.MODE_PROFILES[_effective_mode]
+    analyze_images = _profile.vision_default_on
+
     SUBJECT = SUBJECT_OPTIONS.get(subject_label) if subject_label else None
     LANGUAGE = language_label
     EXAM = EXAM_OPTIONS.get(exam_label, "") if exam_label else ""
@@ -1174,6 +1269,39 @@ if run_button and uploaded_files:
         st.error(f"**{_PROXY_MESSAGES['error'][0]}** — {_PROXY_MESSAGES['error'][1]}")
 
     if authorized:
+        # ---- Model routing: health-check ONCE, then pick one model per task ----
+        # (cached for MODEL_HEALTH_CACHE_MINUTES; a stale/empty cache probes here).
+        _cfg = mr.load_routing_config()
+        decision = None
+        run_mode = PROCESSING_MODE
+        run_profile = _profile
+        auto_reason = None
+        try:
+            with st.spinner("Preparing…"):
+                _health = mr.check_models(_cfg.all_models(), _model_probe(), _cfg)
+            # Auto: pick the concrete speed mode from the freshly-probed health.
+            if PROCESSING_MODE == "auto":
+                run_mode, auto_reason = mr.recommend_mode(_cfg, _health)
+                run_profile = mr.MODE_PROFILES[run_mode]
+            decision = mr.resolve(run_mode, _cfg, _health, manual=_manual_overrides())
+        except mr.RouterError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Model routing failed: {e}")
+
+    if authorized and decision is not None:
+        # Which model was picked is backend detail — surface it only in developer
+        # mode (DEBUG / ?debug=1), never to end users.
+        if _developer_mode():
+            if auto_reason:
+                st.success(f"Auto-selected **{mr.MODE_LABELS[run_mode]}** — {auto_reason}")
+            rt_cols = st.columns(3)
+            rt_cols[0].metric("Notes model", mr.model_label(decision.notes.model))
+            rt_cols[1].metric("Vision model", mr.model_label(decision.vision.model) if decision.vision.model else "—")
+            rt_cols[2].metric("Pro model used", "Yes" if decision.pro_used else "No")
+            for reason in decision.reasons():
+                st.info(reason)
+
         st.session_state.results = []
         total = len(uploaded_files)
         # Animated status container so it's always clear the task is running
@@ -1194,12 +1322,19 @@ if run_button and uploaded_files:
                     try:
                         result = run_pipeline(
                             tmp_path, subject=SUBJECT, language=LANGUAGE, mode=MODE,
-                            google_token=google_token, model=DEFAULT_MODEL,
-                            send_images_to_ai=SEND_IMAGES, strict_filter=STRICT_FILTER,
+                            google_token=google_token, model=decision.notes.model,
+                            send_images_to_ai=analyze_images, strict_filter=STRICT_FILTER,
                             allow_mock=False, image_insert_mode=IMAGE_MODE, dtp_note_policy=DTP_POLICY,
-                            ai_redraw_diagrams=AI_REDRAW, image_model=IMAGE_MODEL,
+                            ai_redraw_diagrams=run_profile.redraw_diagrams, image_model=IMAGE_MODEL,
+                            retry_callback=st.write,
                             exam=EXAM, strict_math=STRICT_MATH,
                             math_render_mode=MATH_RENDER_MODE,
+                            processing_mode=run_mode,
+                            notes_model=decision.notes.model,
+                            vision_model=decision.vision.model or decision.notes.model,
+                            qc_model=(decision.qc.model if decision.qc else None),
+                            qc_level=run_profile.qc_level,
+                            routing_summary=decision.summary(),
                         )
                         result_dict = _result_to_dict(uploaded.name, result)
                         st.session_state.results.append(result_dict)
@@ -1233,6 +1368,29 @@ if results:
                 st.caption("Usage tracked in the PW Usage Cost sheet.")
             elif r.get("usage_logged") is False:
                 st.warning("Usage logging failed on the PW proxy — this run was not recorded in the Usage Cost sheet.")
+            # ---- Run summary: time + cost transparency ----
+            _rs = r.get("run_summary") or {}
+            if _rs:
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Time taken", f"{_rs.get('total_processing_seconds', 0)}s")
+                s2.metric("Slides processed", _rs.get("slides_processed", 0))
+                s3.metric("Sent to vision", _rs.get("slides_sent_to_vision", 0))
+                # Which models ran is backend detail — developer mode only.
+                if _developer_mode():
+                    st.caption(
+                        f"Mode: **{_rs.get('processing_mode','?').title()}** · "
+                        f"Notes: **{mr.model_label(_rs.get('notes_model',''))}** · "
+                        f"Vision: **{mr.model_label(_rs.get('vision_model',''))}** · "
+                        f"QC: **{(mr.model_label(_rs['qc_model']) if _rs.get('qc_model') else 'off')}** · "
+                        f"Pro used: **{'Yes' if _rs.get('pro_used') else 'No'}** · "
+                        f"Fallback: **{'Yes' if _rs.get('fallback_used') else 'No'}**"
+                    )
+                st.caption(
+                    f"App {_rs.get('app_version','')} · started {_rs.get('started_at','')} · "
+                    f"ended {_rs.get('ended_at','')}"
+                )
+                for reason in _rs.get("routing_reasons") or []:
+                    st.caption(f"↳ {reason}")
             # Equation warnings get their own tab, so keep them out of the
             # general warning stack rather than showing each twice.
             _eq_warnings = set(r.get("equation_warnings") or [])
@@ -1301,3 +1459,7 @@ if results:
                     st.caption("No run log found for this file.")
                 if rd:
                     st.caption(f"Run folder: {rd}")
+
+# ---- Footer -----------------------------------------------------------------
+st.divider()
+st.caption(version.footer_text())

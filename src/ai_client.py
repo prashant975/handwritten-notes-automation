@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import random
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,12 +76,121 @@ def _usage_from_proxy(resp: dict[str, Any] | None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Retry policy (shared by every Gemini call via GeminiClient._generate_content)
+# Retry/rate policy (shared by every Gemini call via GeminiClient)
 # ---------------------------------------------------------------------------
-_MAX_EMPTY_RETRIES = 3          # empty-but-"successful" responses: retry 1s, 2s, 4s
-_MAX_TRANSIENT_RETRIES = 3      # 429 / 5xx: same backoff
+_MAX_EMPTY_RETRIES = 4          # empty-but-"successful" responses: retry 1s, 2s, 4s, 8s
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 _STATUS_RE = re.compile(r"\berror (\d{3})\b")
+_TRANSIENT_NAMES = {
+    "TooManyRequests", "ResourceExhausted", "ServiceUnavailable",
+    "DeadlineExceeded",
+}
+
+
+def _env_number(name: str, default, minimum, maximum, cast):
+    raw = os.getenv(name)
+    try:
+        value = cast(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        logger.warning("invalid %s=%r; using default %s", name, raw, default)
+        return default
+    if value < minimum or value > maximum:
+        logger.warning("%s=%r outside %s..%s; using default %s",
+                       name, raw, minimum, maximum, default)
+        return default
+    return value
+
+
+@dataclass(frozen=True)
+class GeminiRequestSettings:
+    max_concurrency: int
+    request_delay: float
+    max_attempts: int
+    initial_delay: float
+    max_delay: float
+    timeout: float
+
+    @classmethod
+    def from_env(cls):
+        # Defaults tuned for SPEED: run several chunk calls at once with only a
+        # short start-to-start gap. The old 1-at-a-time / 3s-gap defaults
+        # serialized the whole deck and were the dominant source of slowness.
+        # The Vertex regional fallback (pw_access) + the retry loop below absorb
+        # the occasional 429 that higher concurrency can provoke.
+        return cls(
+            max_concurrency=_env_number("GEMINI_MAX_CONCURRENCY", 3, 1, 16, int),
+            request_delay=_env_number("GEMINI_REQUEST_DELAY_SECONDS", 0.5, 0.0, 300.0, float),
+            max_attempts=_env_number("GEMINI_MAX_RETRIES", 6, 1, 20, int),
+            initial_delay=_env_number("GEMINI_RETRY_INITIAL_DELAY_SECONDS", 2.0, 0.1, 300.0, float),
+            max_delay=_env_number("GEMINI_RETRY_MAX_DELAY_SECONDS", 60.0, 0.1, 900.0, float),
+            timeout=_env_number("GEMINI_REQUEST_TIMEOUT_SECONDS", 120.0, 5.0, 900.0, float),
+        )
+
+
+class GeminiRequestGate:
+    """Process-wide concurrency limiter and start-to-start request pacer."""
+
+    def __init__(self, settings: GeminiRequestSettings):
+        self.settings = settings
+        self._semaphore = threading.BoundedSemaphore(settings.max_concurrency)
+        self._spacing_lock = threading.Lock()
+        self._last_start = 0.0
+
+    def __enter__(self):
+        self._semaphore.acquire()
+        with self._spacing_lock:
+            wait = self.settings.request_delay - (time.monotonic() - self._last_start)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_start = time.monotonic()
+        return self
+
+    def __exit__(self, *_):
+        self._semaphore.release()
+
+
+_REQUEST_SETTINGS = GeminiRequestSettings.from_env()
+_REQUEST_GATE = GeminiRequestGate(_REQUEST_SETTINGS)
+
+# Thinking budget (tokens) for note/vision generation. Gemini 2.5+/3.x are
+# reasoning models; left uncapped, a chunk carrying several slide images can
+# spend the ENTIRE output-token budget on internal thinking and return
+# finishReason=MAX_TOKENS with EMPTY text (the "Gemini returned an empty response"
+# failure). Capping the thinking leaves room for the actual notes — and A/B tests
+# show low reasoning ≈ the same note quality, while being faster and cheaper.
+# Set GEMINI_THINKING_BUDGET=-1 to disable the cap (use the model's dynamic default).
+_THINKING_BUDGET = _env_number("GEMINI_THINKING_BUDGET", 2048, -1, 32768, int)
+
+# Ceiling the adaptive empty-retry may widen maxOutputTokens up to. Denser decks
+# need more room for visible text once thinking is stripped back.
+_EMPTY_RETRY_MAX_OUTPUT = _env_number("GEMINI_EMPTY_RETRY_MAX_OUTPUT", 32000, 4000, 65536, int)
+
+
+def _relax_generation_for_empty(cfg: dict[str, Any], retry: int) -> dict[str, int]:
+    """Mutate a generationConfig IN PLACE so the *next* attempt is more likely to
+    return visible text after an empty response.
+
+    The dominant empty-response cause is a reasoning model spending its whole
+    output budget on internal thinking (finishReason MAX_TOKENS, thoughtsTokenCount
+    high, text ""). Retrying the identical request just repeats that outcome, so
+    a deck dense enough to trigger it once would burn through every retry. Instead
+    each empty retry (1) widens the visible-output budget and (2) progressively
+    clamps the model's thinking — halving from a sane start, floored at 256 so
+    models that require some thinking (e.g. 3.x Pro) stay valid. Together these
+    cover both classes of deck: models that honour thinkingBudget get their
+    thinking cut; models that ignore it still gain enough extra room after
+    thinking for real text. This is what makes generation survive ANY deck."""
+    cur_out = int(cfg.get("maxOutputTokens") or 16000)
+    cfg["maxOutputTokens"] = min(_EMPTY_RETRY_MAX_OUTPUT, max(cur_out, int(cur_out * 1.5)))
+    # Halve the CURRENT thinking budget each retry (cfg is mutated in place, so
+    # this compounds: 2048 -> 1024 -> 512 -> 256), floored at 256 so models that
+    # require some thinking (e.g. 3.x Pro) stay valid.
+    cur_think = (cfg.get("thinkingConfig") or {}).get("thinkingBudget")
+    if not isinstance(cur_think, int) or cur_think < 0:
+        cur_think = 2048
+    thinking = max(256, cur_think >> 1)
+    cfg["thinkingConfig"] = {"thinkingBudget": thinking}
+    return {"maxOutputTokens": cfg["maxOutputTokens"], "thinkingBudget": thinking}
 
 
 def _status_from_error(e: Exception) -> int | None:
@@ -92,6 +204,49 @@ def _status_from_error(e: Exception) -> int | None:
         return status
     m = _STATUS_RE.search(str(e))
     return int(m.group(1)) if m else None
+
+
+def _is_transient_error(e: Exception, status: int | None) -> bool:
+    if status in _TRANSIENT_STATUS:
+        return True
+    names = {type(e).__name__}
+    names.update(type(base).__name__ for base in type(e).__mro__)
+    text = str(e).lower()
+    return bool(names & _TRANSIENT_NAMES) or any(
+        marker.lower() in text for marker in _TRANSIENT_NAMES
+    )
+
+
+def _retry_after_seconds(e: Exception) -> float | None:
+    for obj in (e, getattr(e, "response", None)):
+        headers = getattr(obj, "headers", None)
+        if headers:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _terminal_error_message(e: Exception, status: int | None, transient: bool) -> str:
+    text = str(e)
+    lowered = text.lower()
+    if status in {401, 403}:
+        return "Gemini authentication or permission failed. Reconnect Google and verify Vertex AI access."
+    if status == 429 and any(word in lowered for word in ("quota", "billing", "exhausted")):
+        return (
+            "Gemini quota is exhausted after automatic retries. Verify Vertex AI "
+            "quota and billing for the configured project, then retry this file."
+        )
+    if transient:
+        return (
+            "Gemini is temporarily unavailable or rate-limited after automatic "
+            "retries. Wait a few minutes and retry this file."
+        )
+    if status in {400, 404, 422}:
+        return "Gemini configuration or request is invalid. Verify the configured project, location, and model."
+    return text
 
 
 def _response_id(result: dict[str, Any] | None) -> str:
@@ -236,6 +391,7 @@ class GeminiClient:
         model: str = "gemini-2.5-pro",
         *,
         session: "pw_access.UsageSession | None" = None,
+        retry_callback: "Callable[[str], None] | None" = None,
     ):
         # `google_token` may be a token string OR a provider callable (see
         # src/pw_auth.token_provider_for). Prefer the callable: a Google
@@ -246,6 +402,7 @@ class GeminiClient:
         self.google_token = google_token if callable(google_token) else (google_token or "").strip()
         self.model = model.strip() or "gemini-2.5-pro"
         self.session = session
+        self.retry_callback = retry_callback
         if not self.google_token:
             raise GeminiError(
                 "No Google token available. Sign in with your @pw.live Google "
@@ -283,27 +440,53 @@ class GeminiClient:
         while True:
             attempt += 1
             try:
-                resp = pw_access.gemini_generate(
-                    self.google_token,
-                    model=model,
-                    request=body,
-                    session=self.session,
+                logger.info(
+                    "gemini request: attempt=%d/%d model=%s operation=generateContent",
+                    attempt, _REQUEST_SETTINGS.max_attempts, model,
                 )
-            except pw_access.PWAccessError as e:
-                status = _status_from_error(e)
-                if status in _TRANSIENT_STATUS and transient_retries < _MAX_TRANSIENT_RETRIES:
-                    transient_retries += 1
-                    delay = float(2 ** (transient_retries - 1))
-                    logger.warning(
-                        "gemini transient error: attempt=%d status=%s retry=%d/%d delay=%.0fs err=%s",
-                        attempt, status, transient_retries, _MAX_TRANSIENT_RETRIES, delay, str(e)[:200],
+                with _REQUEST_GATE:
+                    resp = pw_access.gemini_generate(
+                        self.google_token,
+                        model=model,
+                        request=body,
+                        session=self.session,
+                        timeout=_REQUEST_SETTINGS.timeout,
                     )
+            except Exception as e:
+                status = _status_from_error(e)
+                transient = _is_transient_error(e, status)
+                if transient and attempt < _REQUEST_SETTINGS.max_attempts:
+                    transient_retries += 1
+                    calculated = min(
+                        _REQUEST_SETTINGS.max_delay,
+                        _REQUEST_SETTINGS.initial_delay * (2 ** (attempt - 1)),
+                    )
+                    delay = max(_retry_after_seconds(e) or 0.0, calculated + random.uniform(0, calculated * 0.25))
+                    message = (
+                        f"Gemini is temporarily rate-limited. Retrying in "
+                        f"{delay:.0f} seconds (attempt {attempt + 1}/{_REQUEST_SETTINGS.max_attempts})."
+                    )
+                    logger.warning(
+                        "gemini transient error: attempt=%d/%d status=%s model=%s "
+                        "operation=generateContent retry_delay=%.2fs err=%s",
+                        attempt, _REQUEST_SETTINGS.max_attempts, status, model, delay, str(e)[:200],
+                    )
+                    if self.retry_callback:
+                        try:
+                            self.retry_callback(message)
+                        except Exception:
+                            pass
                     time.sleep(delay)
                     continue
-                # Auth (401/403), other 4xx, or transient retries exhausted: surface it.
-                logger.error("gemini call failed (no retry): attempt=%d status=%s err=%s",
-                             attempt, status, str(e)[:200])
-                raise GeminiError(str(e), provider="pw_proxy", status_code=status) from e
+                logger.error(
+                    "gemini final failure: attempt=%d/%d status=%s transient=%s "
+                    "model=%s operation=generateContent err=%r",
+                    attempt, _REQUEST_SETTINGS.max_attempts, status, transient, model, e,
+                )
+                raise GeminiError(
+                    _terminal_error_message(e, status, transient),
+                    provider="pw_proxy", status_code=status, details=str(e),
+                ) from e
 
             result = resp.get("result") if isinstance(resp, dict) else None
             empty = _response_is_empty(result, expect=expect)
@@ -323,12 +506,20 @@ class GeminiClient:
 
             if empty_retries < _MAX_EMPTY_RETRIES:
                 empty_retries += 1
-                delay = float(2 ** (empty_retries - 1))     # 1s, 2s, 4s
+                delay = float(2 ** (empty_retries - 1))     # 1s, 2s, 4s, 8s
+                # Adapt the request before retrying so a deck that deterministically
+                # empties out (thinking eats the whole budget) still converges to
+                # real text instead of failing every identical retry. Text only —
+                # image redraw has no text and must keep its responseModalities.
+                relaxed = None
+                if expect == "text":
+                    relaxed = _relax_generation_for_empty(
+                        body.setdefault("generationConfig", {}), empty_retries)
                 logger.warning(
                     "gemini EMPTY response: attempt=%d response_id=%s finish_reason=%s "
-                    "retry=%d/%d delay=%.0fs",
+                    "retry=%d/%d delay=%.0fs relaxed=%s",
                     attempt, _response_id(result), _finish_reason(result),
-                    empty_retries, _MAX_EMPTY_RETRIES, delay,
+                    empty_retries, _MAX_EMPTY_RETRIES, delay, relaxed,
                 )
                 time.sleep(delay)
                 continue
@@ -343,10 +534,15 @@ class GeminiClient:
                 details=result,
             )
 
-    def generate(self, prompt: str, image_paths: list[Path] | None = None, *, max_output_tokens: int = 12000, temperature: float = 0.15, max_images: int = 8) -> GeminiResponse:
+    def generate(self, prompt: str, image_paths: list[Path] | None = None, *, max_output_tokens: int = 16000, temperature: float = 0.15, max_images: int = 8) -> GeminiResponse:
+        gen_cfg = {"temperature": temperature, "maxOutputTokens": max_output_tokens}
+        # Cap the model's internal thinking so it can't eat the whole output budget
+        # (which produces an empty MAX_TOKENS response on image-heavy chunks).
+        if _THINKING_BUDGET >= 0:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": _THINKING_BUDGET}
         body = {
             "contents": [{"role": "user", "parts": _build_rest_parts(prompt, image_paths, max_images=max_images)}],
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens},
+            "generationConfig": gen_cfg,
         }
         dropped = _fit_body_to_budget(body)
         data = self._generate_content(self.model, body)

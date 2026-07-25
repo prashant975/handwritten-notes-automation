@@ -12,7 +12,7 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 from .docx_layout import add_title_block, add_watermark, is_kalam_installed, setup_footer, setup_header
 from .dtp_parser import parse_dtp_note
 from .image_regions import crop_region, detect_regions
-from .image_tools import extract_pw_logo, smart_crop_image
+from .image_tools import extract_pw_logo, make_white_transparent, smart_crop_image
 from .math_renderer import (
     ARROW as _ARROW,
     BAR as _BAR,
@@ -472,6 +472,11 @@ def _insert_slide_image(doc: Document, image_path: Path, run_dir: Path, mode: st
     # Region crops are already tight, so they are inserted as-is.
     if mode == "smart_crop" and not already_cropped and not _has_alpha(img):
         img = smart_crop_image(img, run_dir / "inserted_images")
+    # Make the (near-)white background transparent so the diagram blends into the
+    # note page instead of sitting in a white box. No-op for already-transparent
+    # images; make_white_transparent returns the original on any failure.
+    if not _has_alpha(img):
+        img = make_white_transparent(img, run_dir / "inserted_images" / f"{Path(img).stem}_t.png")
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     try:

@@ -66,9 +66,10 @@ footer with page numbers. The logo/watermark are extracted from the lecture slid
 into the project. If present, it is used for the header and watermark instead of
 the slide-extracted logo.
 
-**AI-redraw diagrams (handwritten style):** enable *"AI-redraw diagrams"* in the
-app (or `--ai-redraw-diagrams` on the CLI) to redraw each inserted diagram with
-the Gemini image model — white background, blue handwritten text/formulas,
+**AI-redraw diagrams (handwritten style):** every inserted diagram is redrawn by
+default in both the app and CLI. Use `--no-ai-redraw-diagrams` on the CLI only
+when you intentionally want to disable it. The Gemini image model uses a white
+background, blue handwritten text/formulas,
 original diagram-line colours preserved (light colours darkened so they show on
 white). Uses the `gemini-2.5-flash-image` model, costs extra API quota, and falls
 back to the original slide image if a redraw fails.
@@ -140,6 +141,37 @@ python run_cli.py --input path\to\lecture_folder --subject biology --mode summar
 ```
 
 A single file still works the same way (`--input lecture.pdf`).
+
+### Gemini 429 / RESOURCE_EXHAUSTED
+
+HTTP 429 means Vertex AI temporarily rate-limited the request or the configured
+project has exhausted a quota. The application now sends Gemini requests
+through one process-wide gate: one request at a time by default, with three
+seconds between request starts. Transient 429/500/502/503/504 responses are
+retried up to seven total attempts using exponential backoff and random jitter.
+Authentication, permission, and malformed-request errors are not retried.
+
+Defaults can be adjusted before starting the application:
+
+```powershell
+$env:GEMINI_MAX_CONCURRENCY="1"
+$env:GEMINI_REQUEST_DELAY_SECONDS="3"
+$env:GEMINI_MAX_RETRIES="7"
+$env:GEMINI_RETRY_MAX_DELAY_SECONDS="60"
+.\START_WINDOWS.bat
+```
+
+For the packaged build:
+
+```powershell
+.\dist\HandwrittenNotesAppTeam\HandwrittenNotesAppTeam.exe
+```
+
+If all retries still end in 429, check the Vertex AI quotas for the configured
+Google Cloud project in Google Cloud Console and confirm that billing is active.
+Repeated immediate 429 responses generally indicate a real project quota or
+billing limit rather than a short traffic burst. The application does not
+change models, regions, projects, or authentication automatically.
 
 ## 5. What is improved from MVP
 
