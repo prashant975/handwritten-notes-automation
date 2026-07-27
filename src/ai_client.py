@@ -392,6 +392,7 @@ class GeminiClient:
         *,
         session: "pw_access.UsageSession | None" = None,
         retry_callback: "Callable[[str], None] | None" = None,
+        fallback_models: list[str] | None = None,
     ):
         # `google_token` may be a token string OR a provider callable (see
         # src/pw_auth.token_provider_for). Prefer the callable: a Google
@@ -401,6 +402,13 @@ class GeminiClient:
         # proxy rejects it.
         self.google_token = google_token if callable(google_token) else (google_token or "").strip()
         self.model = model.strip() or "gemini-2.5-pro"
+        # Runtime fallback chain: models tried, in order, if `self.model` keeps
+        # returning empty text (see _generate_content). Distinct from the health
+        # check — this catches a model that is UP but empties on a specific deck.
+        self.fallback_models = [
+            m.strip() for m in (fallback_models or [])
+            if isinstance(m, str) and m.strip() and m.strip() != self.model
+        ]
         self.session = session
         self.retry_callback = retry_callback
         if not self.google_token:
@@ -426,14 +434,28 @@ class GeminiClient:
            (1s, 2s, 4s). `expect` selects what counts as output: "text" for
            note generation, "image" for diagram redraw (which returns
            inline_data and NO text — it must not be misread as empty).
+        3. A model that is UP but keeps returning empty text for THIS deck
+           (e.g. a Pro model exhausting its output budget on internal thinking
+           over an equation-dense slide). After the empty-retries above are
+           spent, generation falls through to the next model in
+           self.fallback_models (text only — the text fallbacks aren't image
+           models), so one stubborn deck can't fail the whole run.
 
         The first non-empty response is returned immediately. Every attempt is
-        logged with attempt number, response id, finish reason, and emptiness so
-        intermittent behaviour is visible in the logs. Usage note: Gemini bills
-        empty responses too, so their tokens still accumulate into the
-        UsageSession — retries are never double-logged beyond what Vertex
+        logged with model, attempt number, response id, finish reason, and
+        emptiness so intermittent behaviour is visible in the logs. Usage note:
+        Gemini bills empty responses too, so their tokens still accumulate into
+        the UsageSession — retries are never double-logged beyond what Vertex
         actually charged.
         """
+        # Models to try, in order. Runtime fallback applies to text only.
+        models = [model]
+        if expect == "text":
+            for m in self.fallback_models:
+                if m and m not in models:
+                    models.append(m)
+        mi = 0
+        current = models[0]
         empty_retries = 0
         transient_retries = 0
         attempt = 0
@@ -442,12 +464,12 @@ class GeminiClient:
             try:
                 logger.info(
                     "gemini request: attempt=%d/%d model=%s operation=generateContent",
-                    attempt, _REQUEST_SETTINGS.max_attempts, model,
+                    attempt, _REQUEST_SETTINGS.max_attempts, current,
                 )
                 with _REQUEST_GATE:
                     resp = pw_access.gemini_generate(
                         self.google_token,
-                        model=model,
+                        model=current,
                         request=body,
                         session=self.session,
                         timeout=_REQUEST_SETTINGS.timeout,
@@ -469,7 +491,7 @@ class GeminiClient:
                     logger.warning(
                         "gemini transient error: attempt=%d/%d status=%s model=%s "
                         "operation=generateContent retry_delay=%.2fs err=%s",
-                        attempt, _REQUEST_SETTINGS.max_attempts, status, model, delay, str(e)[:200],
+                        attempt, _REQUEST_SETTINGS.max_attempts, status, current, delay, str(e)[:200],
                     )
                     if self.retry_callback:
                         try:
@@ -481,7 +503,7 @@ class GeminiClient:
                 logger.error(
                     "gemini final failure: attempt=%d/%d status=%s transient=%s "
                     "model=%s operation=generateContent err=%r",
-                    attempt, _REQUEST_SETTINGS.max_attempts, status, transient, model, e,
+                    attempt, _REQUEST_SETTINGS.max_attempts, status, transient, current, e,
                 )
                 raise GeminiError(
                     _terminal_error_message(e, status, transient),
@@ -491,17 +513,19 @@ class GeminiClient:
             result = resp.get("result") if isinstance(resp, dict) else None
             empty = _response_is_empty(result, expect=expect)
             logger.info(
-                "gemini response: attempt=%d response_id=%s finish_reason=%s empty=%s",
-                attempt, _response_id(result), _finish_reason(result), empty,
+                "gemini response: attempt=%d model=%s response_id=%s finish_reason=%s empty=%s",
+                attempt, current, _response_id(result), _finish_reason(result), empty,
             )
             if not empty:
-                if empty_retries or transient_retries:
+                if empty_retries or transient_retries or mi:
                     logger.info(
-                        "gemini succeeded after retries: attempts=%d empty_retries=%d transient_retries=%d",
-                        attempt, empty_retries, transient_retries,
+                        "gemini succeeded after retries: model=%s attempts=%d empty_retries=%d "
+                        "transient_retries=%d model_switches=%d",
+                        current, attempt, empty_retries, transient_retries, mi,
                     )
-                # Stash the proxy-level usage so callers can fall back to it.
+                # Stash the proxy usage + which model actually produced the text.
                 result.setdefault("_pw_usage", resp.get("usage") or {})
+                result.setdefault("_model_used", current)
                 return result
 
             if empty_retries < _MAX_EMPTY_RETRIES:
@@ -516,20 +540,41 @@ class GeminiClient:
                     relaxed = _relax_generation_for_empty(
                         body.setdefault("generationConfig", {}), empty_retries)
                 logger.warning(
-                    "gemini EMPTY response: attempt=%d response_id=%s finish_reason=%s "
+                    "gemini EMPTY response: model=%s attempt=%d response_id=%s finish_reason=%s "
                     "retry=%d/%d delay=%.0fs relaxed=%s",
-                    attempt, _response_id(result), _finish_reason(result),
+                    current, attempt, _response_id(result), _finish_reason(result),
                     empty_retries, _MAX_EMPTY_RETRIES, delay, relaxed,
                 )
                 time.sleep(delay)
                 continue
 
+            # This model is spent. Fall through to the next fallback model (a
+            # flash model that won't over-think) rather than failing the run.
+            if mi < len(models) - 1:
+                mi += 1
+                nxt = models[mi]
+                logger.warning(
+                    "gemini EMPTY after %d retries on %s; falling back to %s",
+                    _MAX_EMPTY_RETRIES, current, nxt,
+                )
+                if self.retry_callback:
+                    try:
+                        self.retry_callback(f"{current} returned no text; retrying with {nxt}.")
+                    except Exception:
+                        pass
+                current = nxt
+                empty_retries = 0
+                attempt = 0        # give the new model its own transient budget
+                continue
+
             logger.error(
-                "gemini empty after all retries: attempts=%d response_id=%s finish_reason=%s",
-                attempt, _response_id(result), _finish_reason(result),
+                "gemini empty after all retries and fallbacks: models=%s response_id=%s finish_reason=%s",
+                models, _response_id(result), _finish_reason(result),
             )
             raise GeminiError(
-                f"Gemini returned an empty response after {_MAX_EMPTY_RETRIES} retry attempts.",
+                f"Gemini returned an empty response after {_MAX_EMPTY_RETRIES} retry attempts"
+                + (f" across {len(models)} models ({', '.join(models)})" if len(models) > 1 else "")
+                + ".",
                 provider="pw_proxy",
                 details=result,
             )
@@ -554,7 +599,8 @@ class GeminiClient:
                 details=data,
             )
         usage = _usage_from_mapping(data) or _usage_from_proxy({"usage": data.get("_pw_usage")})
-        return GeminiResponse(text=text, provider="pw_proxy", model=self.model, raw=data,
+        return GeminiResponse(text=text, provider="pw_proxy",
+                              model=data.get("_model_used") or self.model, raw=data,
                               usage=usage, images_dropped=dropped)
 
     def test_connection(self) -> GeminiResponse:

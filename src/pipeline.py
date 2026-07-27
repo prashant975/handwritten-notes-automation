@@ -98,6 +98,8 @@ def run_pipeline(
     processing_mode: str = "balanced",
     notes_model: str | None = None,      # defaults to `model`
     vision_model: str | None = None,     # defaults to notes_model
+    notes_fallbacks: list[str] | None = None,   # runtime fallback chain (after primary)
+    vision_fallbacks: list[str] | None = None,
     qc_model: str | None = None,
     qc_level: str = "basic",             # "off" | "basic" | "strict"
     routing_summary: dict | None = None,
@@ -179,11 +181,11 @@ def run_pipeline(
             # UsageSession so cost still collapses to one row per model.
             notes_client = GeminiClient(
                 google_token, model=notes_model, session=usage_session,
-                retry_callback=retry_callback,
+                retry_callback=retry_callback, fallback_models=notes_fallbacks,
             )
             vision_client = notes_client if vision_model == notes_model else GeminiClient(
                 google_token, model=vision_model, session=usage_session,
-                retry_callback=retry_callback,
+                retry_callback=retry_callback, fallback_models=vision_fallbacks,
             )
             client = notes_client        # used by the optional diagram-redraw path
             chunks = list(chunked(active_slides, batch_size))

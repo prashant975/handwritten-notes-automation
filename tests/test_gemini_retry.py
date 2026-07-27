@@ -67,6 +67,7 @@ class _Harness:
         self.calls = 0
         self.sleeps: list[float] = []
         self.gen_configs: list[dict] = []   # snapshot of generationConfig per call
+        self.models: list[str] = []         # model used per call
 
     def __enter__(self):
         self._orig_gen = pw_access.gemini_generate
@@ -83,6 +84,7 @@ class _Harness:
 
         def fake_generate(token, *, model, request, session=None, **kw):
             self.calls += 1
+            self.models.append(model)
             # The client mutates the body in place across empty-retries, so snapshot
             # the generationConfig as it was on THIS call.
             self.gen_configs.append(dict((request or {}).get("generationConfig") or {}))
@@ -148,6 +150,36 @@ def test_empty_text_retry_adapts_request():
     # First call uses the generate() defaults; each retry relaxes further.
     assert outs == [16000, 24000, 32000, 32000, 32000], outs   # widened, capped at 32000
     assert thinks == [2048, 1024, 512, 256, 256], thinks        # halved, floored at 256
+
+
+def test_empty_falls_back_to_next_model():
+    # A model that is UP but keeps emptying out on this deck must not fail the run:
+    # after its 4 retries are spent, generation switches to the next model, which
+    # succeeds. This is what makes an equation-dense deck survive a Pro model that
+    # exhausts its budget on internal thinking.
+    script = [_empty_response(f"e{i}") for i in range(5)] + [_ok_response(response_id="ok-fb")]
+    with _Harness(script) as h:
+        resp = GeminiClient(TOKEN, model="gemini-3.1-pro-preview",
+                            fallback_models=["gemini-3.6-flash"]).generate("prompt", [])
+    assert resp.text == "Generated notes."
+    assert resp.model == "gemini-3.6-flash", resp.model      # attributed to the model that answered
+    assert h.calls == 6, f"expected 5 on primary + 1 on fallback, got {h.calls}"
+    assert h.models == (["gemini-3.1-pro-preview"] * 5) + ["gemini-3.6-flash"], h.models
+    assert h.sleeps == [1.0, 2.0, 4.0, 8.0], h.sleeps        # no extra sleep on the model switch
+
+
+def test_empty_on_all_models_raises_naming_them():
+    # Every model empties -> a single clear error that names the models tried.
+    script = [_empty_response(f"e{i}") for i in range(10)]
+    with _Harness(script) as h:
+        try:
+            GeminiClient(TOKEN, model="gemini-3.1-pro-preview",
+                         fallback_models=["gemini-3.6-flash"]).generate("prompt", [])
+            raise AssertionError("expected GeminiError")
+        except GeminiError as e:
+            assert "empty response after 4 retry attempts" in str(e), str(e)
+            assert "gemini-3.1-pro-preview" in str(e) and "gemini-3.6-flash" in str(e), str(e)
+    assert h.calls == 10, f"expected 5 per model x 2 models, got {h.calls}"
 
 
 def test_image_empty_retry_does_not_adapt_generation():

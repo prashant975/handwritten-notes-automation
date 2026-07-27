@@ -426,6 +426,25 @@ def resolve(mode: str, cfg: RoutingConfig, health: dict[str, ModelHealth], *,
                            pro_used, fallback_used, health)
 
 
+def available_chain(task: str, mode: str, cfg: RoutingConfig,
+                    health: dict[str, ModelHealth]) -> list[str]:
+    """Health-available models for a task, in fallback order (primary first).
+
+    resolve() picks the FIRST of these; the rest are the RUNTIME fallback list.
+    If the chosen model returns an empty/failed response mid-generation (e.g. a
+    Pro model exhausting its output budget on internal thinking over an
+    equation-dense slide), the pipeline retries that chunk on the next model here
+    — typically a flash model that won't over-think — so a single stubborn deck
+    can't fail the whole run."""
+    mode = mode if mode in MODES else DEFAULT_MODE
+    out: list[str] = []
+    for m in _effective_chain(task, mode, cfg):
+        h = health.get(m)
+        if h and h.available and m not in out:
+            out.append(m)
+    return out
+
+
 # --------------------------------------------------------------------------
 # Auto mode selection — pick the best speed mode for current availability
 # --------------------------------------------------------------------------

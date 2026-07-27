@@ -1276,6 +1276,8 @@ if run_button and uploaded_files:
         run_mode = PROCESSING_MODE
         run_profile = _profile
         auto_reason = None
+        notes_fallbacks: list[str] = []
+        vision_fallbacks: list[str] = []
         try:
             with st.spinner("Preparing…"):
                 _health = mr.check_models(_cfg.all_models(), _model_probe(), _cfg)
@@ -1284,6 +1286,12 @@ if run_button and uploaded_files:
                 run_mode, auto_reason = mr.recommend_mode(_cfg, _health)
                 run_profile = mr.MODE_PROFILES[run_mode]
             decision = mr.resolve(run_mode, _cfg, _health, manual=_manual_overrides())
+            # Runtime fallback chains: all health-available models per task, in
+            # order. If the chosen (primary) model empties on a stubborn deck,
+            # the pipeline retries that chunk on the next model here — so one
+            # equation-dense file can't fail the whole run.
+            notes_fallbacks = mr.available_chain("notes", run_mode, _cfg, _health)
+            vision_fallbacks = mr.available_chain("vision", run_mode, _cfg, _health)
         except mr.RouterError as e:
             st.error(str(e))
         except Exception as e:
@@ -1332,6 +1340,8 @@ if run_button and uploaded_files:
                             processing_mode=run_mode,
                             notes_model=decision.notes.model,
                             vision_model=decision.vision.model or decision.notes.model,
+                            notes_fallbacks=notes_fallbacks,
+                            vision_fallbacks=vision_fallbacks,
                             qc_model=(decision.qc.model if decision.qc else None),
                             qc_level=run_profile.qc_level,
                             routing_summary=decision.summary(),
