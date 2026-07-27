@@ -1002,6 +1002,10 @@ with st.sidebar:
 
 # Dynamic identity line (recomputed every rerun, so it reflects the load time).
 _now = version.now()
+# Release/build date shown next to the version (config build stamp "2026.07.27"
+# -> "27-07-2026"); falls back to the raw stamp if it isn't a dotted date.
+_bd = str(APP_VERSION).split(".")
+_release_date = f"{_bd[2]}-{_bd[1]}-{_bd[0]}" if len(_bd) == 3 else str(APP_VERSION)
 st.markdown(
     f"""
     <div class="app-header">
@@ -1011,7 +1015,7 @@ st.markdown(
                 <div class="app-title">{version.APP_NAME}</div>
                 <div class="app-subtitle">Upload a PDF or PowerPoint and download generated notes.</div>
                 <div class="app-subtitle">
-                    Version: <b>{version.APP_VERSION}</b> &nbsp;·&nbsp;
+                    Version: <b>{version.APP_VERSION} ({_release_date})</b> &nbsp;·&nbsp;
                     Date: <b>{version.format_date(_now)}</b> &nbsp;·&nbsp;
                     Time: <b>{version.format_time(_now)}</b>
                 </div>
