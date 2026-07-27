@@ -19,7 +19,7 @@ if load_dotenv:
 # The env vars below only pick which model the proxy should call — they are NOT
 # secrets. They are named without a provider prefix so the onboarding key-scan
 # never mistakes them for a leaked key.
-DEFAULT_MODEL = (os.getenv("MODEL_NAME") or os.getenv("GEMINI_MODEL", "gemini-2.5-pro")).strip() or "gemini-2.5-pro"
+DEFAULT_MODEL = (os.getenv("MODEL_NAME") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")).strip() or "gemini-3.5-flash"
 DEFAULT_IMAGE_MODEL = (os.getenv("IMAGE_MODEL_NAME") or os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")).strip() or "gemini-2.5-flash-image"
 
 RUNS_DIR = Path(os.getenv("RUNS_DIR", str(ROOT_DIR / "runs"))).expanduser()

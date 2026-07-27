@@ -109,18 +109,18 @@ def load_routing_config() -> RoutingConfig:
     # wired as the fast fallback for the high-volume tasks (notes, qc); gemini-2.5-flash
     # / gemini-2.5-pro are always appended as the final safety net.
     notes = (
-        _env("NOTES_MODEL_PRIMARY", "gemini-3.6-flash"),
-        _env("NOTES_MODEL_FALLBACK_1", "gemini-3.5-flash"),
+        _env("NOTES_MODEL_PRIMARY", "gemini-3.5-flash"),
+        _env("NOTES_MODEL_FALLBACK_1", "gemini-3.6-flash"),
         _env("NOTES_MODEL_FALLBACK_2", "gemini-2.5-flash"),
     )
     vision = (
         _env("VISION_MODEL_PRIMARY", "gemini-3.5-flash"),
-        _env("VISION_MODEL_FALLBACK_1", "gemini-3.1-pro-preview"),
-        _env("VISION_MODEL_FALLBACK_2", "gemini-3.6-flash"),
+        _env("VISION_MODEL_FALLBACK_1", "gemini-3.6-flash"),
+        _env("VISION_MODEL_FALLBACK_2", "gemini-2.5-flash"),
     )
     qc = (
-        _env("QC_MODEL_PRIMARY", "gemini-3.6-flash"),
-        _env("QC_MODEL_FALLBACK_1", "gemini-3.5-flash"),
+        _env("QC_MODEL_PRIMARY", "gemini-3.5-flash"),
+        _env("QC_MODEL_FALLBACK_1", "gemini-3.6-flash"),
         _env("QC_MODEL_FALLBACK_2", "gemini-2.5-flash"),
     )
     classify = (notes[0], SAFETY_NET_FLASH)  # cheapest flash; never the Pro model
@@ -140,16 +140,17 @@ def load_routing_config() -> RoutingConfig:
 # Per-mode PRIMARY choice for each task (spec section 3 tables). The task's own
 # fallback chain + the safety net are appended after this primary.
 def _mode_primaries(cfg: RoutingConfig) -> dict:
-    notes_p, notes_f1 = cfg.notes[0], cfg.notes[1]
-    vision_p, vision_f1 = cfg.vision[0], cfg.vision[1]
+    notes_p = cfg.notes[0]
+    vision_p = cfg.vision[0]
     qc_p = cfg.qc[0]
     return {
         FAST:         {"notes": notes_p, "vision": notes_p, "qc": None},
         BALANCED:     {"notes": notes_p, "vision": vision_p, "qc": qc_p},
-        # High Quality makes NOTES with the Pro model (vision_f1 = gemini-3.1-pro-preview,
-        # falling back to gemini-3.6-flash from the notes chain), and also runs vision
-        # on Pro. This is the "best notes" mode the user asked for.
-        HIGH_QUALITY: {"notes": vision_f1, "vision": vision_f1, "qc": qc_p},
+        # High Quality uses the SAME fast notes/vision model (gemini-3.5-flash),
+        # which reads dense handwritten equations reliably WITHOUT the Pro model's
+        # empty-response behaviour, and layers on strict equation checks, on-demand
+        # equation OCR, and diagram redraw for quality (see MODE_PROFILES).
+        HIGH_QUALITY: {"notes": notes_p, "vision": vision_p, "qc": qc_p},
     }
 
 
@@ -167,8 +168,9 @@ MODE_PROFILES = {
     BALANCED: ModeProfile(vision_default_on=True, redraw_diagrams=False, qc_level="basic"),
     HIGH_QUALITY: ModeProfile(
         vision_default_on=True, redraw_diagrams=True, qc_level="strict",
-        warn="High Quality Mode: notes on Gemini 3.1 Pro (→ 3.6 Flash fallback) + strict "
-             "equation checks + diagram redraw. Best quality, but slower and costs more.",
+        warn="High Quality Mode: notes/vision on Gemini 3.5 Flash + strict equation "
+             "checks + on-demand equation OCR + diagram redraw. Full quality without "
+             "the Pro model's empty-response risk.",
     ),
 }
 

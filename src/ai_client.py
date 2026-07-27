@@ -118,8 +118,8 @@ class GeminiRequestSettings:
         # The Vertex regional fallback (pw_access) + the retry loop below absorb
         # the occasional 429 that higher concurrency can provoke.
         return cls(
-            max_concurrency=_env_number("GEMINI_MAX_CONCURRENCY", 3, 1, 16, int),
-            request_delay=_env_number("GEMINI_REQUEST_DELAY_SECONDS", 0.5, 0.0, 300.0, float),
+            max_concurrency=_env_number("GEMINI_MAX_CONCURRENCY", 6, 1, 16, int),
+            request_delay=_env_number("GEMINI_REQUEST_DELAY_SECONDS", 0.2, 0.0, 300.0, float),
             max_attempts=_env_number("GEMINI_MAX_RETRIES", 6, 1, 20, int),
             initial_delay=_env_number("GEMINI_RETRY_INITIAL_DELAY_SECONDS", 2.0, 0.1, 300.0, float),
             max_delay=_env_number("GEMINI_RETRY_MAX_DELAY_SECONDS", 60.0, 0.1, 900.0, float),

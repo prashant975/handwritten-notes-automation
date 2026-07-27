@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+import os
 import time
 
 import pw_access
@@ -24,6 +25,18 @@ from .prompt_builder import build_generation_prompt, build_merge_prompt
 from .quality_checker import quality_check
 from .slide_filter import filter_slides
 from .utils import chunked, copy_input, ensure_dir, make_run_id, preserve_filename, write_json, zip_dir
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Lazy Mathpix trigger: OCR + regenerate a chunk only when its equations still show
+# at least this many issues AFTER local repair. Higher = stingier (less OCR cost).
+_MATH_OCR_MIN_ISSUES = _int_env("MATH_OCR_MIN_ISSUES", 3)
 
 
 def _api_call_metadata(resp, **extra) -> dict:
@@ -158,16 +171,10 @@ def run_pipeline(
             input_unit="No. of pages",
             count=active_slide_count,
         )
-        # Mathpix is purpose-built for printed and handwritten equation OCR.
-        # Scan mathematics slides through the PW proxy, then filter again using
-        # the recovered image text before Gemini sees the deck.
-        if subject.strip().lower() == "mathematics" and not (allow_mock and not google_token):
-            warnings.extend(enrich_math_slides(active_slides, google_token, usage_session))
-            active_slides, post_ocr_report = filter_slides(active_slides, strict=strict_filter)
-            filter_report.extend({**entry, "stage": "post_math_ocr"} for entry in post_ocr_report)
-            active_slide_count = len(active_slides)
-            if not active_slides:
-                raise RuntimeError("No instructional slides remained after promotion/question filtering.")
+        # Mathpix OCR is now LAZY (see _run_chunk): rather than OCRing every maths
+        # slide up front — billed even when generation later fails — each chunk is
+        # generated first and only OCR'd + regenerated when its equations come out
+        # weak. A deck the model already reads well pays ZERO Mathpix.
         write_json(run_dir / "filter_report.json", filter_report)
         write_json(run_dir / "slides_for_ai.json", [s.__dict__ for s in active_slides])
         if allow_mock and not google_token:  # a provider callable is truthy -> real run
@@ -189,46 +196,84 @@ def run_pipeline(
             )
             client = notes_client        # used by the optional diagram-redraw path
             chunks = list(chunked(active_slides, batch_size))
+            math_can_ocr = subject.strip().lower() == "mathematics" and not (allow_mock and not google_token)
+
+            def _equation_issues(text: str) -> int:
+                """How many equation problems remain AFTER local repair — the signal
+                for whether a chunk's math is weak enough to be worth Mathpix."""
+                if not (strict_math and text):
+                    return 0
+                repaired, _ = repair_equations(text)
+                return int(check_equations(repaired).get("issue_count", 0))
 
             def _run_chunk(i: int, slide_chunk):
-                prompt = build_generation_prompt(subject, mode, language_code, slide_chunk, chunk_label=f"{i}/{len(chunks)}", exam=exam, strict_math=strict_math)
-                # Selective vision: only attach images that actually carry content.
-                vision_slides = [
-                    s for s in slide_chunk
-                    if _needs_vision(s, processing_mode=processing_mode, vision_on=send_images_to_ai)
-                ]
-                images = [s.image_path for s in vision_slides]
-                client = vision_client if images else notes_client
-                resp = client.generate(prompt, images, max_images=max_images_per_call)
-                (run_dir / f"notes_chunk_{i:02d}.txt").write_text(resp.text, encoding="utf-8")
-                return i, resp, len(vision_slides)
+                def _generate():
+                    prompt = build_generation_prompt(subject, mode, language_code, slide_chunk, chunk_label=f"{i}/{len(chunks)}", exam=exam, strict_math=strict_math)
+                    # Selective vision: only attach images that actually carry content.
+                    vision_slides = [
+                        s for s in slide_chunk
+                        if _needs_vision(s, processing_mode=processing_mode, vision_on=send_images_to_ai)
+                    ]
+                    images = [s.image_path for s in vision_slides]
+                    gen_client = vision_client if images else notes_client
+                    return gen_client.generate(prompt, images, max_images=max_images_per_call), len(vision_slides)
 
-            # Run chunk calls concurrently (they are network-bound). Cap workers to
-            # stay clear of rate limits; the client retries transient 429/5xx.
+                resp, n_vision = _generate()
+                ocr_used = False
+                # LAZY Mathpix: only when this chunk's equations came out weak (after
+                # local repair) do we OCR its slides and regenerate — so Mathpix is
+                # billed strictly where the model struggled, never up front.
+                if math_can_ocr and _equation_issues(resp.text) >= _MATH_OCR_MIN_ISSUES:
+                    before = _equation_issues(resp.text)
+                    enrich_math_slides(slide_chunk, google_token, usage_session)
+                    ocr_used = True
+                    resp2, n_vision2 = _generate()
+                    if _equation_issues(resp2.text) < before:   # keep the better one
+                        resp, n_vision = resp2, n_vision2
+                (run_dir / f"notes_chunk_{i:02d}.txt").write_text(resp.text, encoding="utf-8")
+                return i, resp, n_vision, ocr_used
+
+            # Run chunk calls concurrently (they are network-bound). One chunk that
+            # fails terminally (empties on every model) must NOT lose the whole file,
+            # so failures degrade to a placeholder and the rest still complete.
             chunk_results: dict[int, object] = {}
-            with ThreadPoolExecutor(max_workers=min(4, max(1, len(chunks)))) as ex:
-                futures = [ex.submit(_run_chunk, i, ch) for i, ch in enumerate(chunks, start=1)]
-                try:
-                    for fut in as_completed(futures):
-                        try:
-                            i, resp, n_vision = fut.result()
-                        except GeminiError:
-                            raise
-                        except Exception as e:
-                            raise GeminiError(f"Gemini generation failed: {e}") from e
-                        chunk_results[i] = resp
+            placeholder_text: dict[int, str] = {}
+            ocr_chunks = 0
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(chunks)))) as ex:
+                future_map = {ex.submit(_run_chunk, i, ch): (i, ch) for i, ch in enumerate(chunks, start=1)}
+                for fut in as_completed(future_map):
+                    idx, chunk = future_map[fut]
+                    try:
+                        idx, resp, n_vision, ocr_used = fut.result()
+                        chunk_results[idx] = resp
                         vision_slide_total += n_vision
-                except BaseException:
-                    # One chunk failed terminally — abandon the queued chunks so
-                    # they don't keep calling (and billing) Gemini pointlessly.
-                    ex.shutdown(wait=False, cancel_futures=True)
-                    raise
+                        if ocr_used:
+                            ocr_chunks += 1
+                    except Exception as e:
+                        nums = ", ".join(str(s.slide_no) for s in chunk)
+                        placeholder = (f"\n(Note to DTP: pages {nums} could not be generated "
+                                       f"automatically after retries — please add these slides manually.)\n")
+                        (run_dir / f"notes_chunk_{idx:02d}.txt").write_text(placeholder, encoding="utf-8")
+                        placeholder_text[idx] = placeholder
+                        warnings.append(f"Pages {nums} failed after retries and were left as a placeholder ({e}).")
+            if not chunk_results:
+                # Nothing generated at all — surface the real failure instead of
+                # writing a document that is entirely placeholders.
+                raise GeminiError(
+                    "Every section failed to generate. " + (warnings[-1] if warnings else ""),
+                    provider="pw_proxy",
+                )
+            if ocr_chunks:
+                warnings.append(f"Ran equation OCR on {ocr_chunks} section(s) where the math came out weak.")
             images_dropped = 0
-            for i in sorted(chunk_results):
-                resp = chunk_results[i]
-                partial_notes.append(resp.text)
-                images_dropped += getattr(resp, "images_dropped", 0)
-                api_metadata.append(_api_call_metadata(resp, chunk=i))
+            for i in range(1, len(chunks) + 1):
+                if i in chunk_results:
+                    resp = chunk_results[i]
+                    partial_notes.append(resp.text)
+                    images_dropped += getattr(resp, "images_dropped", 0)
+                    api_metadata.append(_api_call_metadata(resp, chunk=i))
+                elif i in placeholder_text:
+                    partial_notes.append(placeholder_text[i])
             if images_dropped:
                 warnings.append(
                     f"{images_dropped} slide image(s) were omitted from AI calls to fit "
