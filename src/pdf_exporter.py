@@ -43,11 +43,26 @@ def _export_with_word(docx_path: Path, output_dir: Path) -> tuple[Path | None, s
     doc = None
     try:
         pythoncom.CoInitialize()
-        word = win32com.client.DispatchEx("Word.Application")
+        try:
+            word = win32com.client.DispatchEx("Word.Application")
+        except Exception as e:
+            return None, f"Microsoft Word could not be started for automation: {e}"
         word.Visible = False
         word.DisplayAlerts = 0
-        doc = word.Documents.Open(str(docx_path.resolve()))
-        doc.SaveAs(str(pdf_path.resolve()), FileFormat=17)
+        doc = word.Documents.Open(str(docx_path.resolve()), ReadOnly=True)
+        if doc is None:
+            # Word started but the document object came back empty — its COM
+            # automation isn't fully available in this environment (common with
+            # Store/Click-to-Run Office, or an incomplete pywin32 bundle).
+            return None, ("Microsoft Word opened but returned no document — its COM "
+                          "automation is unavailable here. Install LibreOffice for "
+                          "reliable PDF export, or Save As PDF from Word manually.")
+        # Prefer Word's native PDF exporter (works when SaveAs sometimes won't),
+        # then fall back to SaveAs.
+        try:
+            doc.ExportAsFixedFormat(str(pdf_path.resolve()), 17)   # wdExportFormatPDF
+        except Exception:
+            doc.SaveAs(str(pdf_path.resolve()), FileFormat=17)     # wdFormatPDF
         if pdf_path.exists():
             return pdf_path, None
         return None, "Microsoft Word ran but did not create a PDF."

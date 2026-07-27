@@ -28,7 +28,7 @@ APP_NAME = os.getenv("APP_NAME", "Handwritten Notes Automation")
 # Build stamp — shown in the sidebar so stale team installs are identifiable at
 # a glance. Bump when sharing a new team build. The semantic app version shown
 # in the header ("Version: v2.1.0") lives in src/version.py.
-APP_VERSION = "2026.07.25"
+APP_VERSION = "2026.07.27"
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
