@@ -1,52 +1,43 @@
 /**
- * pw_access.js — shared PW app-access client for JavaScript apps.
+ * pw_access.js - PW App Kit v2 client for browser, Node, Vercel, and edge apps.
  *
- * The JS twin of pw_access.py. Use it in:
- *   - browser SPAs / static sites (React, Vue, plain JS), and
- *   - Node / Vercel / edge backends.
+ * The app ships no provider keys. All paid provider calls go through the PW
+ * proxy, which verifies the signed-in PW user, checks the app whitelist, calls
+ * the provider with proxy-held keys, and writes trusted raw usage logs.
  *
- * Talks ONLY to the shared proxy and holds NO keys — so it's safe even in a
- * public frontend bundle. Every call takes the signed-in user's Google token
- * (access token OR id token); the proxy verifies it, checks the app-wise
- * whitelist, calls the paid API with its own key, logs usage, returns result.
- *
- * IMPORTANT — Google tokens expire after ~1 HOUR (the app session may be
- * 7 days, but the Google token inside it is not). For anything that can run
- * longer than an hour, pass a TOKEN PROVIDER instead of a raw string: a
- * zero-arg (optionally async) function that returns a currently-valid token.
- * Every helper here accepts either. With a provider, the kit fetches a token
- * before each request and, on a 401, refreshes once and retries — so long
- * runs survive the 1-hour expiry. See USAGE EXAMPLES at the bottom.
- *
- * Works anywhere `fetch` exists: modern browsers, Node 18+, edge runtimes.
- * This file is ESM. For CommonJS, swap `export` for `module.exports = { ... }`.
+ * Raw logging model:
+ *   - One successful proxy/provider call = one raw row in MongoDB/sheet export.
+ *   - For multi-call tasks, create one task_id and pass it to every helper.
+ *   - Combine later in Sheets/AppScript by task_id + app + email + model.
  */
 
-// --- PER-APP CONFIG — the only thing each app changes ---------------------
-// APP_NAME must EXACTLY match a header in row 1 of the `Whitelisted` tab.
-export const APP_NAME = "Final ZIP Package";
+export const APP_NAME = "SET-YOUR-APP-NAME";
 export const PROXY_BASE_URL = "https://pw-apps-proxy.vercel.app";
 
-const TIMEOUT_MS = 30_000;      // allowlist / logging
-const AI_TIMEOUT_MS = 300_000;  // gemini / mathpix / sarvam
-
-// Browser apps use proxy-first for Gemini (they can't safely hold a Vertex
-// token, and Vertex blocks browser CORS). Node/backends use token-vending.
-const IS_BROWSER = typeof window !== "undefined" && typeof document !== "undefined";
-const _vertexCache = { token: "", project: "", location: "global", expiry: 0 };
+const TIMEOUT_MS = 30_000;
+const AI_TIMEOUT_MS = 300_000;
+const LARGE_REQUEST_CHARS = 3_500_000;
 
 export class PWAccessError extends Error {}
+
+export function newTaskId(prefix = "task") {
+  const safe = String(prefix || "task").replace(/[^a-zA-Z0-9_-]/g, "") || "task";
+  const c = globalThis.crypto;
+  const id = c?.randomUUID
+    ? c.randomUUID().replace(/-/g, "")
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `${safe}-${id}`;
+}
 
 function authHeaders(token) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-/** `googleToken` may be a plain string OR a zero-arg (async) function — a
- *  "token provider" — that returns a currently-valid token. A provider is what
- *  makes runs longer than Google's ~1-hour token lifetime work. */
 async function resolveToken(googleToken) {
   return typeof googleToken === "function" ? await googleToken() : googleToken;
 }
+
+const sessionPass = { token: "", expiry: 0 };
 
 async function postOnce(path, token, body, timeoutMs) {
   const ctrl = new AbortController();
@@ -63,20 +54,36 @@ async function postOnce(path, token, body, timeoutMs) {
   }
 }
 
-/** POST to the proxy. If a token provider (function) was supplied and the
- *  proxy answers 401 — the token aged past ~1 hour mid-run — ask the provider
- *  for a fresh token and retry ONCE. Raw string tokens keep the old behavior
- *  (no retry possible: the kit has no way to refresh a string). */
+async function authToken(googleToken, forceNew = false) {
+  if (!forceNew && sessionPass.token && Date.now() < sessionPass.expiry - 60_000) {
+    return sessionPass.token;
+  }
+
+  const google = await resolveToken(googleToken);
+  try {
+    const r = await postOnce("/api/session", google, {}, TIMEOUT_MS);
+    if (r.status === 200) {
+      const data = await r.json();
+      if (data.session_token) {
+        sessionPass.token = data.session_token;
+        sessionPass.expiry = Number(data.expires_at_ms) || 0;
+        return sessionPass.token;
+      }
+    }
+  } catch {
+    // Network blip: fall back to the Google token for this call.
+  }
+  return google;
+}
+
 async function postJSON(path, googleToken, body, timeoutMs) {
-  let r = await postOnce(path, await resolveToken(googleToken), body, timeoutMs);
-  if (r.status === 401 && typeof googleToken === "function") {
-    r = await postOnce(path, await resolveToken(googleToken), body, timeoutMs);
+  let r = await postOnce(path, await authToken(googleToken), body, timeoutMs);
+  if (r.status === 401) {
+    r = await postOnce(path, await authToken(googleToken, true), body, timeoutMs);
   }
   return r;
 }
 
-/** "allowed" | "denied" | "error" — lets callers treat "proxy unreachable"
- *  (error) differently from a real "no" (denied). */
 export async function checkAllowedStatus(googleToken, app = APP_NAME) {
   if (!googleToken) return "denied";
   try {
@@ -89,209 +96,236 @@ export async function checkAllowedStatus(googleToken, app = APP_NAME) {
   }
 }
 
-/** Call before EVERY paid/main run. Fail closed (false on any error). */
 export async function checkAllowed(googleToken, app = APP_NAME) {
   return (await checkAllowedStatus(googleToken, app)) === "allowed";
 }
 
-/** Append one Usage Cost row per item. Never throws — returns null on failure. */
-export async function logUsage(googleToken, { filename, input_unit, count, items, app = APP_NAME }) {
+export async function logUsage(
+  googleToken,
+  { filename, input_unit, count, items, task_id = "", taskId = "", video_duration = "", app = APP_NAME }
+) {
   try {
-    const r = await postJSON("/api/usage-log", googleToken,
-      { app, filename, input_unit, count, items }, TIMEOUT_MS);
+    const r = await postJSON(
+      "/api/usage-log",
+      googleToken,
+      { app, filename, input_unit, count, items, task_id: task_id || taskId, video_duration },
+      TIMEOUT_MS,
+    );
     return r.status === 200 ? await r.json() : null;
   } catch {
     return null;
   }
 }
 
-/** Accumulates a task's provider usage and writes ONE row per provider on
- *  flush() — so many calls to the same provider collapse into a single Usage
- *  Cost row (one Gemini row, one Mathpix row, one Sarvam row). */
 export class UsageSession {
-  constructor(googleToken, { filename = "", input_unit = "", count = null, app = APP_NAME } = {}) {
+  constructor(
+    googleToken,
+    {
+      filename = "",
+      input_unit = "",
+      count = null,
+      video_duration = "",
+      app = APP_NAME,
+      task_id = "",
+      taskId = "",
+    } = {},
+  ) {
     this.token = googleToken;
+    this.task_id = task_id || taskId || newTaskId();
     this.filename = filename;
     this.input_unit = input_unit;
     this.count = count;
+    this.video_duration = video_duration;
     this.app = app;
-    this._byModel = new Map();
   }
-  add(model, tokensIn = 0, tokensOut = 0, costInr = null) {
-    const k = model || "";
-    const a = this._byModel.get(k)
-      || { tokens_in: 0, tokens_out: 0, cost_inr: 0, cost_known: false, requests: 0 };
-    a.tokens_in += Number(tokensIn || 0);
-    a.tokens_out += Number(tokensOut || 0);
-    a.requests += 1;
-    if (costInr != null) { a.cost_inr += Number(costInr || 0); a.cost_known = true; }
-    this._byModel.set(k, a);
+  add() {
+    return null;
   }
   async flush() {
-    const items = [...this._byModel.entries()].map(([model, v]) => {
-      const item = { model, tokens_in: v.tokens_in, tokens_out: v.tokens_out, requests: v.requests };
-      if (v.cost_known) item.cost_inr = Math.round(v.cost_inr * 1e4) / 1e4;
-      return item;
-    });
-    this._byModel.clear();
-    if (!items.length) return null;
-    return logUsage(this.token,
-      { filename: this.filename, input_unit: this.input_unit, count: this.count, items, app: this.app });
+    return {
+      ok: true,
+      task_id: this.task_id,
+      note: "raw provider calls already logged by proxy",
+    };
   }
 }
 
-async function getVertex(googleToken, app = APP_NAME) {
-  const now = Date.now();
-  if (_vertexCache.token && now < _vertexCache.expiry - 600000) return _vertexCache;
-  const r = await postJSON("/api/vertex/token", googleToken, { app }, TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`vertex token ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const d = await r.json();
-  _vertexCache.token = d.token || "";
-  _vertexCache.project = d.project || "";
-  _vertexCache.location = d.location || "global";
-  _vertexCache.expiry = now + (Number(d.expires_in) || 3300) * 1000;
-  return _vertexCache;
+function applyTaskContext(body, session = null, taskIdValue = "") {
+  let id = taskIdValue;
+  if (session) {
+    if (!id) id = session.task_id || "";
+    if (body.app === APP_NAME && session.app && session.app !== APP_NAME) body.app = session.app;
+    for (const key of ["filename", "input_unit", "video_duration"]) {
+      if (!body[key] && session[key]) body[key] = session[key];
+    }
+    if ((body.count == null || body.count === "") && session.count != null) body.count = session.count;
+  }
+  if (id) body.task_id = id;
 }
 
-/** Gemini. Browser → proxy-first (`/api/gemini/generate`). Node/backend →
- *  token-vending: calls Vertex directly (no 4.5 MB proxy body limit).
- *  Returns { ok, result, model, usage, cost_inr }; `result` is the raw
- *  generateContent response (same shape as the Gemini API). */
-export async function geminiGenerate(googleToken,
-  { model, request, filename = "", input_unit = "", count = null, app = APP_NAME, session = null }) {
-  if (IS_BROWSER) {
-    const body = { app, model, request, filename, input_unit, count };
-    if (session) body.log = false;
-    const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
-    if (r.status !== 200) throw new PWAccessError(`gemini proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    const data = await r.json();
-    if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-    return data;
+async function raiseProxyError(name, r) {
+  if (r.status !== 200) {
+    throw new PWAccessError(`${name} proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
   }
-  // Node/backend: token-vending — call Vertex directly.
-  const v = await getVertex(googleToken, app);
-  const host = v.location === "global" ? "aiplatform.googleapis.com" : `${v.location}-aiplatform.googleapis.com`;
-  const url = `https://${host}/v1/projects/${v.project}/locations/${v.location}/publishers/google/models/${model}:generateContent`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
-  let data;
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${v.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(request),
-      signal: ctrl.signal,
-    });
-    if (!r.ok) throw new PWAccessError(`vertex gemini ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    data = await r.json();
-  } finally {
-    clearTimeout(timer);
-  }
-  const um = data.usageMetadata || {};
-  const tin = um.promptTokenCount || 0;
-  const tout = (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
-  if (session) session.add(model, tin, tout, null);
-  else await logUsage(googleToken,
-    { filename, input_unit, count, items: [{ model, tokens_in: tin, tokens_out: tout, requests: 1 }], app });
-  return { ok: true, result: data, model, usage: { tokens_in: tin, tokens_out: tout }, cost_inr: null };
 }
 
-/** Mathpix OCR through the proxy. Returns { ok, result, cost_inr }. */
-export async function mathpixOcr(googleToken, { request, filename = "", count = 1, app = APP_NAME, session = null }) {
-  const body = { app, request, filename, count };
-  if (session) body.log = false;
+async function uploadLargeJson(googleToken, app, request, providerName) {
+  const requestJson = JSON.stringify(request);
+  if (requestJson.length <= LARGE_REQUEST_CHARS) return "";
+
+  const up = await postJSON("/api/gemini/upload-url", googleToken, { app }, TIMEOUT_MS);
+  if (up.status !== 200) {
+    throw new PWAccessError(`${providerName} upload-url ${up.status}: ${(await up.text()).slice(0, 300)}`);
+  }
+  const { upload_url } = await up.json();
+  const pr = await fetch(upload_url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: requestJson,
+  });
+  if (pr.status !== 200) {
+    throw new PWAccessError(`${providerName} upload ${pr.status}: ${(await pr.text()).slice(0, 300)}`);
+  }
+  return (await pr.json()).url || "";
+}
+
+export async function geminiGenerate(
+  googleToken,
+  {
+    model,
+    request,
+    filename = "",
+    input_unit = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, request, filename, input_unit, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const blobUrl = await uploadLargeJson(googleToken, body.app, request, "gemini");
+  if (blobUrl) {
+    delete body.request;
+    body.request_blob_url = blobUrl;
+  }
+  const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gemini", r);
+  return await r.json();
+}
+
+export async function mathpixOcr(
+  googleToken,
+  { request, filename = "", count = 1, task_id = "", taskId = "", video_duration = "", app = APP_NAME, session = null },
+) {
+  const body = { app, request, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
   const r = await postJSON("/api/mathpix/ocr", googleToken, body, AI_TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`mathpix proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const data = await r.json();
-  if (session) session.add(data.model || "Mathpix OCR", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-  return data;
+  await raiseProxyError("mathpix", r);
+  return await r.json();
 }
 
-/** Sarvam Text-to-Speech through the proxy. Returns { ok, result, cost_inr };
- *  `result` includes the base64 audio (result.audios). */
-export async function sarvamTts(googleToken, { request, filename = "", count = null, app = APP_NAME, session = null }) {
-  const body = { app, request, filename, count };
-  if (session) body.log = false;
+export async function sarvamTts(
+  googleToken,
+  { request, filename = "", count = null, task_id = "", taskId = "", video_duration = "", app = APP_NAME, session = null },
+) {
+  const body = { app, request, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
   const r = await postJSON("/api/sarvam/tts", googleToken, body, AI_TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`sarvam proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const data = await r.json();
-  if (session) session.add(data.model || "Sarvam TTS", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-  return data;
+  await raiseProxyError("sarvam", r);
+  return await r.json();
 }
 
-/** ElevenLabs Text-to-Speech through the proxy. Returns { ok, result, cost_inr };
- *  `result` is { audio_base64, content_type: "audio/mpeg", output_format }.
- *  `request` is the raw ElevenLabs TTS body: { text, model_id, voice_settings }.
- *  `count` = characters billed; if omitted the proxy derives it from request.text. */
-export async function elevenLabsTts(googleToken,
-  { voice_id, request, output_format = "mp3_44100_128", filename = "", count = null, app = APP_NAME, session = null }) {
-  const body = { app, voice_id, request, output_format, filename, count };
-  if (session) body.log = false;
+export async function elevenLabsTts(
+  googleToken,
+  {
+    voice_id,
+    request,
+    output_format = "mp3_44100_128",
+    filename = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, voice_id, request, output_format, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
   const r = await postJSON("/api/elevenlabs/tts", googleToken, body, AI_TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`elevenlabs proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const data = await r.json();
-  if (session) session.add(data.model || "ElevenLabs TTS", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-  return data;
+  await raiseProxyError("elevenlabs", r);
+  return await r.json();
 }
 
-/*
-USAGE EXAMPLES
-
---- Browser SPA (Sign in with Google → call the proxy directly) ---
-  // 1) Get a Google token in the browser via Google Identity Services (GIS).
-  //    For identity/allowlist, an id_token from the credential flow is enough:
-  //      google.accounts.id.initialize({ client_id: YOUR_GOOGLE_CLIENT_ID, callback: onCredential });
-  //    onCredential(resp) => const googleToken = resp.credential;   // a Google id_token
-  // 2) Gate + call:
-  import { checkAllowed, geminiGenerate } from "./pw_access.js";
-  if (!(await checkAllowed(googleToken))) throw new Error("Not authorized");
-  const out = await geminiGenerate(googleToken, {
-    model: "gemini-2.5-flash",
-    request: { contents: [{ role: "user", parts: [{ text: "Hello" }] }] },
-    filename: "demo", input_unit: "No. of questions", count: 1,
-  });
-  console.log(out.result);   // raw Gemini response
-
---- LONG RUNS (>1 hour): pass a token PROVIDER, not a string -------------
-  // Google tokens die after ~1 hour. A cached string WILL start failing with
-  // 401 mid-run. Instead pass a function that returns a fresh token; the kit
-  // calls it before each request and retries once on 401.
-  //
-  // Browser (GIS access-token flow — silent refresh, no popup while the
-  // user's Google session is alive):
-  const tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: YOUR_GOOGLE_CLIENT_ID, scope: "openid email", callback: () => {},
-  });
-  let cached = { token: "", expiry: 0 };
-  async function googleToken() {                    // <-- the provider
-    if (cached.token && Date.now() < cached.expiry - 5 * 60_000) return cached.token;
-    return new Promise((resolve, reject) => {
-      tokenClient.callback = (resp) => {
-        if (resp.error) return reject(new Error(resp.error));
-        cached = { token: resp.access_token, expiry: Date.now() + (resp.expires_in || 3600) * 1000 };
-        resolve(cached.token);
-      };
-      tokenClient.requestAccessToken({ prompt: "" }); // silent
-    });
+export async function claudeGenerate(
+  googleToken,
+  {
+    model,
+    request,
+    filename = "",
+    input_unit = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, request, filename, input_unit, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const blobUrl = await uploadLargeJson(googleToken, body.app, request, "claude");
+  if (blobUrl) {
+    delete body.request;
+    body.request_blob_url = blobUrl;
   }
-  await geminiGenerate(googleToken, { ... });        // note: the function itself, no ()
+  const r = await postJSON("/api/claude/generate", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("claude", r);
+  return await r.json();
+}
 
---- Node / Vercel backend (token forwarded from your frontend) ---
-  import { checkAllowed, sarvamTts, elevenLabsTts } from "./pw_access.js";
-  // googleToken = the user's token your backend received after sign-in
-  // (for long backend jobs, forward a provider that re-fetches from your
-  //  OAuth refresh flow instead of a captured string)
-  if (!(await checkAllowed(googleToken))) return res.status(403).end();
-  const tts = await sarvamTts(googleToken, {
-    request: { text: "नमस्ते", target_language_code: "hi-IN", model: "bulbul:v3", speaker: "anushka" },
-    count: 6,
-  });
+export async function geminiTts(
+  googleToken,
+  {
+    text,
+    voice = "Kore",
+    model = "gemini-3.1-flash-tts-preview",
+    filename = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, text, voice, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const r = await postJSON("/api/gemini/tts", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gemini tts", r);
+  return await r.json();
+}
 
---- ElevenLabs TTS (browser or Node) ---
-  const out = await elevenLabsTts(googleToken, {
-    voice_id: "JBFqnCBsd6RMkjVDRZzb",
-    request: { text: "Hello there", model_id: "eleven_multilingual_v2" },
-    filename: "intro.mp3",
-  });
-  // out.result.audio_base64 → decode to bytes and save/play (audio/mpeg)
-*/
+export async function geminiImage(
+  googleToken,
+  {
+    prompt,
+    model = "gemini-3.1-flash-image",
+    filename = "",
+    count = 1,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, prompt, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const r = await postJSON("/api/gemini/image", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gemini image", r);
+  return await r.json();
+}

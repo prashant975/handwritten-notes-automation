@@ -1,163 +1,192 @@
-# Connect your app to the PW shared proxy — drop-in onboarding
+# Connect An App To The PW Shared Proxy
 
-> **Developer:** put this `pw-app-kit` folder into your app, then tell your AI
-> assistant (Anti-Gravity):
->
-> **“Onboard this app to the PW proxy following CONNECT-TO-PW-PROXY.md. My APP_NAME is '<your exact app name>'.”**
->
-> Then do the 2 human steps below. The AI does everything else.
+This is the implementation checklist for the developer or AI assistant wiring
+an app to the proxy.
 
----
+## Goal
 
-## Fixed facts (already set up — never change these)
+The app must:
+
+- sign in only `@pw.live` users,
+- check the app allowlist before every paid/main action,
+- call providers only through the PW proxy,
+- ship zero provider API keys,
+- send `task_id` for multi-call tasks,
+- rely on proxy-side raw logging, not client-side combined logging.
+
+## Fixed Values
 
 | Thing | Value |
 |---|---|
 | Proxy base URL | `https://pw-apps-proxy.vercel.app` |
-| Control sheet (ONE shared sheet for ALL apps) | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
-| Allowed sign-in domain | `pw.live` |
-| Providers already on the proxy (no keys in your app) | Gemini → `gemini_generate` · Mathpix → `mathpix_ocr` · Sarvam TTS → `sarvam_tts` · ElevenLabs TTS → `elevenlabs_tts` |
+| Control sheet | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
+| Allowlist tab | `Whitelisted` |
+| Raw export tab | `Raw Usage Ledger Export` |
+| Allowed domain | `pw.live` |
 
-**Your app ships ZERO API keys.** The proxy holds them all.
+## 1. Add The Client
 
----
+Use:
 
-## Client by app shape (local, hosted backend, or pure frontend)
+- `pw_access.py` for Python local apps or Python backends.
+- `pw_access.js` for browser, Node, Vercel, or edge apps.
 
-Works for ANY host — local desktop, your own Vercel/Render, a static site. Pick
-the client that fits; the steps are otherwise identical.
+Set:
 
-| App shape | Who calls the proxy | Client to copy in |
-|---|---|---|
-| Local desktop, OR hosted app **with a backend** (FastAPI, Node, Vercel functions) | the backend | `pw_access.py` (Python) or `pw_access.js` (Node) |
-| **Pure frontend / SPA**, no backend (static React/Vue on Vercel, etc.) | the browser, directly | `pw_access.js` (browser) |
+```python
+APP_NAME = "Exact Sheet Header"
+```
 
-- The proxy has **open CORS + Bearer-token auth**, so a browser on any domain can
-  call it directly. The browser only ever holds the **user's own** Google token —
-  never a provider key — so this is safe even in a public frontend bundle.
-- The proxy accepts a Google token from **any** Google sign-in, so a hosted app
-  may use its **own** Google client ID. `@pw.live` is still required.
-- **Gemini routing is automatic — you don't configure it.** `gemini_generate`
-  picks the path itself: a **backend** (Python or Node) fetches a short-lived
-  Vertex token from the proxy and calls Vertex AI **directly** (no 4.5 MB proxy
-  body limit — needed for large PDFs/images); a **browser** calls the proxy's
-  `/api/gemini/generate` instead (Vertex blocks browser CORS, and a browser
-  shouldn't hold a Vertex token). Same `gemini_generate(...)` call either way.
+or in JS:
 
----
+```js
+export const APP_NAME = "Exact Sheet Header";
+```
 
-## Human steps — just 2, one-time
+The app name must exactly match a row-1 header in `Whitelisted`.
 
-1. **Register your app on the sheet.** Open the control sheet → `Whitelisted` tab
-   → put your **exact APP_NAME** in the next empty cell of **row 1**, and list the
-   allowed users' emails down that column.
-2. **Hand it to your AI assistant** with the sentence at the top of this file.
+## 2. Verify App Registration
 
-That's all a human does. Everything below is for the AI.
+Open:
 
----
+```text
+https://pw-apps-proxy.vercel.app/api/apps
+```
 
-## AI assistant — execute in order, do not skip a step
+The app name must appear. If it does not, stop and ask the owner to fix the
+sheet header.
 
-1. **Add the client.** Copy the right client (see "Client by app shape") into
-   the app — `pw_access.py` (Python backend) or `pw_access.js` (Node backend or
-   browser). Set `APP_NAME = "<exact name>"`; leave `PROXY_BASE_URL` at default.
-2. **Verify registration.** `GET https://pw-apps-proxy.vercel.app/api/apps` and
-   confirm `<APP_NAME>` is in the returned list. If it is **not** → STOP and tell
-   the human to finish Human Step 1 (exact spelling matters).
-3. **Locate the Google token — and wire it as a PROVIDER, not a string.** Find
-   where the app obtains the signed-in user's Google token (access token or id
-   token). For a backend, that's its OAuth flow; for a **pure frontend**, use
-   Google Identity Services ("Sign in with Google") in the browser. If the app
-   has no Google sign-in, add one (or ask the human) — a verified `@pw.live`
-   token is required.
+## 3. Use The User's Google Token
 
-   **Google tokens expire after ~1 hour**, so do NOT capture the token once at
-   login and reuse the string — any run/session longer than an hour will start
-   failing with 401. Instead pass every `pw_access` call a **token provider**:
-   a zero-arg function that returns a currently-valid token (refreshing via
-   the app's OAuth flow when the cached one is within ~5 min of expiry). Both
-   clients accept a function anywhere they accept a token, call it before each
-   request, and on a 401 refresh once and retry. Reference implementations are
-   in the header comments of `pw_access.py` / `pw_access.js`.
-4. **Add the access gate.** Before *every* paid/main action:
-   ```python
-   import pw_access
-   if not pw_access.check_allowed(google_token):
-       raise PermissionError("Not authorized for this app.")
-   ```
-   Deny on `False`. (You may keep any existing whitelist ONLY as a fallback for
-   when the proxy is unreachable.)
-5. **Route AI calls through the proxy.** Replace every direct provider call:
-   - Gemini `generateContent` → `pw_access.gemini_generate(token, model=..., request=<same body>, filename=, input_unit=, count=)`
-   - Mathpix `/v3/text` → `pw_access.mathpix_ocr(token, request=<same body>, filename=, count=)`
-   - Sarvam `/text-to-speech` → `pw_access.sarvam_tts(token, request=<same body>, filename=, count=)`
-   - ElevenLabs `/v1/text-to-speech/{voice_id}` → `pw_access.elevenlabs_tts(token, voice_id=..., request=<same body>, filename=, count=)`
-     (returns base64 audio in `result["audio_base64"]`, `audio/mpeg`)
+Use the signed-in user's Google access token or ID token. The proxy verifies
+the token and requires an `@pw.live` email.
 
-   (JS client `pw_access.js`: `geminiGenerate` / `mathpixOcr` / `sarvamTts` /
-   `elevenLabsTts`, same fields, e.g. `await geminiGenerate(token, { model, request, ... })`.)
+The kit automatically exchanges the Google token for a proxy-issued 7-day
+session pass. Apps do not need to manage this themselves.
 
-   **Per-task logging (do this if a task makes MORE THAN ONE AI call):** create
-   one `UsageSession` per task, pass `session=` to each call, and `flush()` at
-   the end. This writes **one Usage Cost row per provider** (one Gemini row, one
-   Sarvam row…) instead of one row per call.
-   ```python
-   s = pw_access.UsageSession(token, filename=fn, input_unit="No. of pages", count=n)
-   pw_access.gemini_generate(token, model=..., request=..., session=s)
-   pw_access.gemini_generate(token, model=..., request=..., session=s)  # more calls
-   s.flush()   # -> ONE combined gemini row
-   ```
-   ```js
-   const s = new UsageSession(token, { filename, input_unit, count });
-   await geminiGenerate(token, { model, request, session: s });
-   await s.flush();
-   ```
-   A task that makes only ONE call can skip the session (each call logs itself).
+For long-running apps, pass a token provider function when available, not an
+old captured token string.
 
-   Read `resp["result"]` for the raw provider response — existing parsing stays
-   unchanged. If the app uses a provider **not** listed above → STOP and tell the
-   human to ask the proxy owner to add it (a one-time proxy change).
-6. **Remove keys.** Delete every provider API key (`GEMINI_API_KEY`,
-   `MATHPIX_*`, `SARVAM_*`, etc.) from `.env`, code, and the build.
-7. **Test** with a whitelisted `@pw.live` user's token:
-   (a) `check_allowed` returns `True`, (b) one AI call returns a result,
-   (c) a new row appears in the `Usage Cost` tab.
-8. **Report** the completion checklist below.
+## 4. Gate Every Paid/Main Action
 
----
+Python:
 
-## Login & session standards (apply to the app's own sign-in)
+```python
+if not pw_access.check_allowed(google_token):
+    raise PermissionError("Not authorized for this app.")
+```
 
-The proxy handles access + logging, but each app owns its Google sign-in. Apply
-these so login behaves the same across every PW app:
+JS:
 
-- **Domain:** only `@pw.live` accounts (the proxy enforces this too).
-- **Session length: 7 days.** If the app mints its own session token/JWT, set
-  its expiry to 7 days (e.g. `timedelta(days=7)`).
-- **Google token ≠ session — it dies after ~1 hour.** The 7-day session is the
-  app's own; the Google token inside it expires after ~1 hour and must be
-  refreshed. Pass `pw_access` a token **provider function** (see AI step 3) so
-  the kit can refresh-and-retry on 401. Never cache the token string for the
-  life of the session — that's the bug that kills runs at the ~50–60 min mark.
-- **Fail closed:** if the allowlist check errors or the network is down → DENY.
-- **Check before every run:** call `check_allowed()` before each paid/main
-  action, not just at login (a user can be removed from the sheet mid-session).
-- **Don't auto-open the browser:** start Google sign-in only on a user click,
-  never on app startup.
-- **Store only session/user tokens** locally (browser storage, or OS keychain
-  for desktop apps). NEVER store a provider API key anywhere in the app.
+```js
+if (!(await checkAllowed(googleToken))) {
+  throw new Error("Not authorized for this app.");
+}
+```
 
----
+Fail closed: if the proxy cannot decide, deny the action.
 
-## Completion checklist — nothing missed
+## 5. Route Provider Calls Through The Proxy
 
-- [ ] `pw_access.py` added, `APP_NAME` set to the exact sheet header
-- [ ] `/api/apps` lists this `APP_NAME`
-- [ ] `check_allowed()` gates every run and denies on failure
-- [ ] all provider calls go through `pw_access` (no direct provider calls remain)
-- [ ] no API keys left in `.env`, code, or build
-- [ ] session = 7 days; sign-in is `@pw.live`-only and not auto-opened on startup
-- [ ] a **token provider** (function) is passed to `pw_access`, not a token
-      string cached at login — runs longer than 1 hour survive
-- [ ] a real run logged a row to the `Usage Cost` tab
+Do not call Gemini, LiteLLM, Mathpix, Anthropic, Sarvam, ElevenLabs, OpenAI, or
+any provider directly from the app.
+
+Use these helpers:
+
+- Python: `gemini_generate`, `claude_generate`, `gemini_tts`, `gemini_image`,
+  `mathpix_ocr`, `sarvam_tts`, `elevenlabs_tts`
+- JS: `geminiGenerate`, `claudeGenerate`, `geminiTts`, `geminiImage`,
+  `mathpixOcr`, `sarvamTts`, `elevenLabsTts`
+
+For Gemini/Claude, keep sending the existing request body shape. Large requests
+above about 3.5 MB are automatically uploaded through the proxy's blob route.
+
+## 6. Add Task ID For Multi-Call Tasks
+
+If one user task makes more than one AI call, create one `task_id` at the start
+and pass it to every helper call.
+
+Python:
+
+```python
+task_id = pw_access.new_task_id("ai-qc")
+
+pw_access.gemini_generate(
+    google_token,
+    model="gemini-2.5-flash",
+    request=generate_content_body,
+    filename="chapter.pdf",
+    input_unit="No. of pages",
+    count=20,
+    task_id=task_id,
+)
+```
+
+JS:
+
+```js
+const task_id = newTaskId("ai-qc");
+
+await geminiGenerate(googleToken, {
+  model: "gemini-2.5-flash",
+  request: generateContentBody,
+  filename: "chapter.pdf",
+  input_unit: "No. of pages",
+  count: 20,
+  task_id,
+});
+```
+
+Each provider call still logs as its own raw row. Later reporting can combine
+by `Task ID + App Name + Email + Model`.
+
+## 7. Do Not Use Old Combined Logging
+
+Do not add `log:false`.
+
+Do not use `UsageSession.flush()` for new code. It remains only so older code
+does not crash; in v2 it is a no-op and raw provider calls are already logged.
+
+Do not call `/api/usage-log` for normal proxy-supported providers. The helper
+`log_usage` / `logUsage` is legacy/manual audit only.
+
+## 8. Remove Keys
+
+Remove provider keys from:
+
+- `.env`
+- source files
+- build scripts
+- desktop packaged files
+- frontend bundles
+
+Search for at least:
+
+`GEMINI`, `LITELLM`, `MATHPIX`, `ANTHROPIC`, `CLAUDE`, `SARVAM`, `ELEVEN`, `OPENAI`
+
+## 9. Test
+
+Run the verifier:
+
+```bash
+python pw-app-kit/verify_onboarding.py .env
+```
+
+or:
+
+```bash
+node pw-app-kit/verify_onboarding.mjs .env
+```
+
+Then sign in as a whitelisted `@pw.live` user and make one real AI call.
+Confirm a new row appears in `Raw Usage Ledger Export`.
+
+## Completion Checklist
+
+- [ ] `APP_NAME` exactly matches `Whitelisted` sheet header
+- [ ] `/api/apps` lists the app
+- [ ] allowlist check runs before every paid/main action
+- [ ] all provider calls use `pw_access`
+- [ ] multi-call tasks pass one `task_id` to every call
+- [ ] no provider keys remain in the app
+- [ ] a live run appears in `Raw Usage Ledger Export`

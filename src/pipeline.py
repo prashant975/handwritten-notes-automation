@@ -11,7 +11,13 @@ import pw_access
 
 from . import version
 from .ai_client import GeminiClient, GeminiError, generate_mock_notes
-from .config import DEFAULT_MATH_RENDER_MODE, LANGUAGE_CODES, RUNS_DIR, SUPPORTED_EXTENSIONS
+from .config import (
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_MATH_RENDER_MODE,
+    LANGUAGE_CODES,
+    RUNS_DIR,
+    SUPPORTED_EXTENSIONS,
+)
 from .docx_layout import derive_chapter_title
 from .docx_writer import write_notes_docx
 from .equation_quality_checker import check_equations, warnings_from_report, write_reports
@@ -102,7 +108,7 @@ def run_pipeline(
     image_insert_mode: str = "smart_crop",
     dtp_note_policy: str = "keep_note_and_insert_image",
     ai_redraw_diagrams: bool = True,
-    image_model: str = "gemini-2.5-flash-image",
+    image_model: str = DEFAULT_IMAGE_MODEL,
     exam: str = "",
     strict_math: bool = True,
     math_render_mode: str = DEFAULT_MATH_RENDER_MODE,
@@ -129,13 +135,19 @@ def run_pipeline(
     # check_allowed fails closed for missing tokens, proxy errors, and denials.
     if not allow_mock and not pw_access.check_allowed(google_token):
         raise PermissionError("Not authorized for this app.")
+    # One task_id per file (= per task), created BEFORE the first AI call and
+    # passed to every Gemini/Mathpix/image call this run makes. The proxy logs
+    # each provider call as its own raw row in `Raw Usage Ledger Export`; the
+    # shared id is what lets reporting combine a run by
+    # Task ID + App Name + Email + Model.
+    task_id = pw_access.new_task_id("handwritten-notes")
     run_dir = ensure_dir(RUNS_DIR / make_run_id("run"))
     warnings: list[str] = []
     raw_notes_path: Path | None = None
     docx_path: Path | None = None
     pdf_path: Path | None = None
     zip_path: Path | None = None
-    usage_session = None
+    ai_calls_made = False
     try:
         copied_input = copy_input(input_path, run_dir / "input")
         slides, extract_warnings = _extract_input(copied_input, run_dir)
@@ -155,22 +167,22 @@ def run_pipeline(
             # Small image batches keep each Vertex request lean (ai_client
             # downscales pages to JPEG under an 18 MB budget) and keep the
             # model's attention per page high; text-only chunks can be larger.
-            batch_size = 4 if send_images_to_ai else 18
+            # NOTE: vision-off is not image-free — _needs_vision still rescues
+            # low-text slides (scanned pages) in ANY mode. Sizing chunks at 18
+            # for such decks silently dropped every image beyond
+            # max_images_per_call (14 of 18 on a fully scanned deck), leaving
+            # most pages invisible to the model. Size by what will be SENT.
+            sends_any_images = send_images_to_ai or any(
+                _needs_vision(s, processing_mode=processing_mode, vision_on=send_images_to_ai)
+                for s in active_slides
+            )
+            batch_size = 4 if sends_any_images else 18
         partial_notes: list[str] = []
         api_metadata: list[dict] = []
         total_slides = len(slides)
         active_slide_count = len(active_slides)
         client = None
         vision_slide_total = 0
-        # One UsageSession per file (=per task). Every Gemini call below is tagged
-        # with `session=` so the proxy accumulates their usage and writes ONE
-        # combined Gemini row per file to the `Usage Cost` tab on flush().
-        usage_session = pw_access.UsageSession(
-            google_token,
-            filename=input_path.name,
-            input_unit="No. of pages",
-            count=active_slide_count,
-        )
         # Mathpix OCR is now LAZY (see _run_chunk): rather than OCRing every maths
         # slide up front — billed even when generation later fails — each chunk is
         # generated first and only OCR'd + regenerated when its equations come out
@@ -181,17 +193,17 @@ def run_pipeline(
             notes_text = generate_mock_notes(subject, mode, language_code, len(active_slides))
             partial_notes = [notes_text]
             api_metadata.append({"provider": "mock", "model": "mock"})
-            usage_session = None
         else:
             # Notes model handles text chunks; the (possibly different) vision
-            # model handles any chunk carrying slide images. Both share the one
-            # UsageSession so cost still collapses to one row per model.
+            # model handles any chunk carrying slide images. Both carry the one
+            # task_id, so this file's rows group together in the raw ledger.
+            ai_calls_made = True
             notes_client = GeminiClient(
-                google_token, model=notes_model, session=usage_session,
+                google_token, model=notes_model, task_id=task_id,
                 retry_callback=retry_callback, fallback_models=notes_fallbacks,
             )
             vision_client = notes_client if vision_model == notes_model else GeminiClient(
-                google_token, model=vision_model, session=usage_session,
+                google_token, model=vision_model, task_id=task_id,
                 retry_callback=retry_callback, fallback_models=vision_fallbacks,
             )
             client = notes_client        # used by the optional diagram-redraw path
@@ -220,18 +232,23 @@ def run_pipeline(
 
                 resp, n_vision = _generate()
                 ocr_used = False
+                ocr_warnings: list[str] = []
                 # LAZY Mathpix: only when this chunk's equations came out weak (after
                 # local repair) do we OCR its slides and regenerate — so Mathpix is
-                # billed strictly where the model struggled, never up front.
-                if math_can_ocr and _equation_issues(resp.text) >= _MATH_OCR_MIN_ISSUES:
-                    before = _equation_issues(resp.text)
-                    enrich_math_slides(slide_chunk, google_token, usage_session)
+                # billed strictly where the model struggled, never up front. The
+                # issue count is computed once and reused as the "before" baseline.
+                before = _equation_issues(resp.text) if math_can_ocr else 0
+                if before >= _MATH_OCR_MIN_ISSUES:
+                    # enrich_math_slides returns per-slide failure warnings; they
+                    # were being discarded here, so "Ran equation OCR" reported
+                    # success even when Mathpix produced nothing at all.
+                    ocr_warnings = enrich_math_slides(slide_chunk, google_token, task_id)
                     ocr_used = True
                     resp2, n_vision2 = _generate()
                     if _equation_issues(resp2.text) < before:   # keep the better one
                         resp, n_vision = resp2, n_vision2
                 (run_dir / f"notes_chunk_{i:02d}.txt").write_text(resp.text, encoding="utf-8")
-                return i, resp, n_vision, ocr_used
+                return i, resp, n_vision, ocr_used, ocr_warnings
 
             # Run chunk calls concurrently (they are network-bound). One chunk that
             # fails terminally (empties on every model) must NOT lose the whole file,
@@ -244,9 +261,10 @@ def run_pipeline(
                 for fut in as_completed(future_map):
                     idx, chunk = future_map[fut]
                     try:
-                        idx, resp, n_vision, ocr_used = fut.result()
+                        idx, resp, n_vision, ocr_used, ocr_warnings = fut.result()
                         chunk_results[idx] = resp
                         vision_slide_total += n_vision
+                        warnings.extend(ocr_warnings)
                         if ocr_used:
                             ocr_chunks += 1
                     except Exception as e:
@@ -283,10 +301,26 @@ def run_pipeline(
                 notes_text = partial_notes[0]
             else:
                 merge_prompt = build_merge_prompt(subject, mode, language_code, partial_notes, exam=exam, strict_math=strict_math)
+                # The merged document must be able to be AT LEAST as long as its
+                # inputs. The old fixed 16k-token budget was provably hit in
+                # production (run_20260801_162845: merge ended finishReason=
+                # MAX_TOKENS) and the truncated text passed every check — the
+                # tail of the notes was silently lost. Scale the budget to the
+                # material (~3 chars/token) and treat truncation as a failure.
+                merge_budget = min(32000, max(16000, sum(len(p) for p in partial_notes) // 3))
                 try:
-                    resp = notes_client.generate(merge_prompt, [], max_images=0)
-                    notes_text = resp.text
+                    resp = notes_client.generate(merge_prompt, [], max_images=0,
+                                                 max_output_tokens=merge_budget)
                     api_metadata.append(_api_call_metadata(resp, chunk="merge"))
+                    if resp.finish_reason == "MAX_TOKENS":
+                        warnings.append(
+                            "Merge output hit the model's token limit and was discarded "
+                            "(it would have silently dropped the end of the notes); "
+                            "concatenating chunk outputs instead."
+                        )
+                        notes_text = "\n\n".join(partial_notes)
+                    else:
+                        notes_text = resp.text
                 except Exception as e:
                     warnings.append(f"Merge call failed; concatenating chunk outputs instead. Error: {e}")
                     notes_text = "\n\n".join(partial_notes)
@@ -328,18 +362,26 @@ def run_pipeline(
                 # Only slides that survived the strict content filter may enter
                 # the redraw/insertion path.  The original list contains QR,
                 # promotion and ASQ/MCQ slides for audit purposes only.
+                # PW_AI_IMAGE_WORKERS was documented in the team notes but never
+                # read. 4 is the measured-good value; raising it against a
+                # quota-limited endpoint only produces 429s, but operators can
+                # now LOWER it when the image quota is tight.
+                try:
+                    redraw_workers = max(1, min(8, int(os.getenv("PW_AI_IMAGE_WORKERS", "4"))))
+                except ValueError:
+                    redraw_workers = 4
                 n_redrawn, redraw_warnings = redraw_slides_handwritten(
-                    client, active_slides, dtp_slide_nums, redraw_dir, image_model=image_model
+                    client, active_slides, dtp_slide_nums, redraw_dir,
+                    image_model=image_model, max_workers=redraw_workers,
                 )
                 warnings.extend(redraw_warnings)
                 warnings.append(f"AI-redrew {n_redrawn} diagram image(s) in handwritten style.")
                 api_metadata.append({"provider": "image", "model": image_model, "redrawn": n_redrawn})
 
-        # All Gemini calls for this file are done — write the single combined
-        # Usage Cost row via the proxy (one Gemini row, tokens + cost summed).
-        usage_logged = False
-        if usage_session is not None:
-            usage_logged = usage_session.flush() is not None
+        # Nothing to flush: under kit v2 the proxy writes one trusted raw row
+        # per provider call as it happens, all stamped with this run's task_id.
+        # A real (non-mock) run therefore IS logged by the time we get here.
+        usage_logged = ai_calls_made
 
         output_dir = ensure_dir(run_dir / "output")
         chapter_title = derive_chapter_title(input_path.stem)
@@ -367,6 +409,9 @@ def run_pipeline(
         run_summary = {
             "app_version": version.APP_VERSION,
             "app_name": version.APP_NAME,
+            # Surfaced so a developer can find this run's rows in the proxy's
+            # `Raw Usage Ledger Export` (they all carry this Task ID).
+            "task_id": task_id,
             "started_at": started_at,
             "ended_at": version.format_datetime(),
             "generated_at": version.iso_now(),
@@ -407,6 +452,7 @@ def run_pipeline(
             "equation_warnings": equation_warnings,
             "model": model,
             "provider_requested": "pw_proxy",
+            "task_id": task_id,
             "usage_logged": usage_logged,
             "send_images_to_ai": send_images_to_ai,
             "strict_filter": strict_filter,
@@ -425,13 +471,9 @@ def run_pipeline(
         return PipelineResult(run_dir=run_dir, docx_path=docx_path, pdf_path=pdf_path, zip_path=zip_path, raw_notes_path=raw_notes_path, warnings=warnings, metadata=run_metadata)
     except Exception as e:
         warnings.append(str(e))
-        # Vertex is billed per successful call, so log whatever usage already
-        # accumulated before the failure — otherwise real cost goes unrecorded.
-        if usage_session is not None:
-            try:
-                usage_session.flush()
-            except Exception:
-                pass
+        # No usage to salvage on failure: every call that actually reached a
+        # provider was already logged raw by the proxy under this task_id, so a
+        # run that dies half-way still has its real cost recorded.
         try:
             write_json(run_dir / "error.json", {"error": str(e), "warnings": warnings})
             zip_path = zip_dir(run_dir, run_dir.with_suffix(".zip"))

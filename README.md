@@ -38,7 +38,7 @@ model:
 
 ```env
 MODEL_NAME=gemini-2.5-pro
-IMAGE_MODEL_NAME=gemini-2.5-flash-image
+IMAGE_MODEL_NAME=gemini-3.1-flash-image
 # PW_PROXY_BASE_URL=https://pw-apps-proxy.vercel.app   # optional override
 ```
 
@@ -71,7 +71,7 @@ default in both the app and CLI. Use `--no-ai-redraw-diagrams` on the CLI only
 when you intentionally want to disable it. The Gemini image model uses a white
 background, blue handwritten text/formulas,
 original diagram-line colours preserved (light colours darkened so they show on
-white). Uses the `gemini-2.5-flash-image` model, costs extra API quota, and falls
+white). Uses the `gemini-3.1-flash-image` model, costs extra API quota, and falls
 back to the original slide image if a redraw fails.
 
 ## 3. Test proxy access before generating notes
@@ -117,9 +117,16 @@ expose_tokens = ["access", "id"]
 ### Usage tracking
 
 Usage is logged by the **PW proxy**, not by the app. Every AI call is routed
-through the proxy, which writes one combined row per file to the shared **Usage
-Cost** tab (App Name, Email, Filename, tokens, cost, …). No sheet or
-service-account configuration is required in this app.
+through the proxy, which writes one trusted **raw row per provider call** to the
+shared **Raw Usage Ledger Export** tab (App Name, Email, Filename, Task ID,
+tokens, cost, …). No sheet or service-account configuration is required in this
+app.
+
+Each file generated gets one **Task ID** (`handwritten-notes-…`), created before
+the first AI call and attached to every Gemini, Mathpix, and image call that run
+makes. To see what one file cost, group the ledger by
+`Task ID + App Name + Email + Model`. The Task ID is written to the run's
+`run_log.json` and shown in the UI in developer mode.
 
 ```powershell
 python -m streamlit run app.py

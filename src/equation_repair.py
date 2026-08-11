@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from .math_renderer import COMMON_FORMULAS, MATH_TAG_RE, split_math_segments
+from .math_renderer import COMMON_FORMULAS, MATH_TAG_RE, flatten_math_tags, split_math_segments
 
 
 def _tag(latex: str) -> str:
@@ -176,6 +176,12 @@ def repair_equations(notes_text: str) -> tuple[str, list[dict]]:
     Returns ``(repaired_text, repairs)``; each repair records the line number,
     rule, before/after and why it fired.
     """
+    # Rebalance nested/unclosed maths tags FIRST, so a malformed tag (e.g. a
+    # sub-expression wrapped in its own [[MATH_INLINE:]] inside an outer formula)
+    # is a single clean tag before either the per-line repair or the downstream
+    # equation-quality check sees it. Without this the leaked "[[MATH_INLINE:"
+    # reads as an untagged formula and needlessly triggers Mathpix OCR.
+    notes_text = flatten_math_tags(notes_text)
     lines = notes_text.splitlines()
     # Whole-document context so a heading like "Vector Cross Product" still
     # licenses a repair on the bullet beneath it.

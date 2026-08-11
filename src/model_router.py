@@ -9,7 +9,7 @@ Goal (per product spec): NEVER fan a task out across several models. Instead —
 
 The three models the product asks for are configured via env (see
 load_routing_config). They may not exist on every proxy, so a real known-good
-safety net (gemini-2.5-flash / gemini-2.5-pro) is always appended to each task
+safety net (gemini-3.6-flash / gemini-2.5-pro) is always appended to each task
 chain — a mis-typed or unreleased model ID can never hard-fail generation, and
 the health panel shows exactly which IDs actually responded.
 """
@@ -40,7 +40,10 @@ AUTO_LABEL = "Auto (Recommended)"
 
 # Known-good models that ALWAYS work on this proxy — appended to every task
 # chain so a bad configured ID never leaves a task with nothing to run.
-SAFETY_NET_FLASH = "gemini-2.5-flash"
+# gemini-2.5-flash is deliberately NOT here: it was removed from every chain
+# (.env.example, TEAM notes) as empty-prone. The flash backstop is 3.6-flash —
+# already a configured fallback, so the only extra safety-net id is 2.5-pro.
+SAFETY_NET_FLASH = "gemini-3.6-flash"
 SAFETY_NET_PRO = "gemini-2.5-pro"
 
 # Cost tiers + display labels for models we know about. Unknown models get a
@@ -51,7 +54,11 @@ _KNOWN = {
     "gemini-3.1-pro-preview": ("high", "Gemini 3.1 Pro Preview"),
     "gemini-2.5-flash": ("low", "Gemini 2.5 Flash"),
     "gemini-2.5-pro": ("high", "Gemini 2.5 Pro"),
-    "gemini-2.5-flash-image": ("medium", "Gemini 2.5 Flash Image"),
+    # Image models the proxy actually serves (see pw-app-kit/pw_access.py:
+    # gemini_image -> "gemini-3.1-flash-image (fast) or gemini-3-pro-image").
+    # gemini-2.5-flash-image is NOT available on this proxy and was removed.
+    "gemini-3.1-flash-image": ("medium", "Gemini 3.1 Flash Image"),
+    "gemini-3-pro-image": ("high", "Gemini 3 Pro Image"),
 }
 
 
@@ -88,8 +95,11 @@ class RoutingConfig:
     qc: tuple[str, ...]
     classify: tuple[str, ...]
     health_cache_minutes: int
+    # MODEL_FALLBACK_ENABLED=false pins each task to its primary model
+    # (consumed by available_chain). USE_PRO_ONLY_WHEN_NEEDED was removed:
+    # it was parsed but never read anywhere, and its "true" default already
+    # described the actual behaviour (Pro sits last in every chain).
     fallback_enabled: bool
-    use_pro_only_when_needed: bool
 
     def all_models(self) -> list[str]:
         seen: list[str] = []
@@ -97,6 +107,15 @@ class RoutingConfig:
             for m in chain:
                 if m and m not in seen:
                     seen.append(m)
+        # The safety nets are selectable by _effective_chain() in every mode,
+        # so they must be health-probed like everything else: _select_task()
+        # skips any model without a health entry, which left the documented
+        # "final safety net" permanently unselectable — with all flash models
+        # down the app raised "No Gemini model is available" naming a Pro
+        # model it had never actually tested.
+        for m in (SAFETY_NET_FLASH, SAFETY_NET_PRO):
+            if m not in seen:
+                seen.append(m)
         return seen
 
 
@@ -105,23 +124,23 @@ def load_routing_config() -> RoutingConfig:
     # (fast/cheap) and gemini-3.1-pro-preview (Pro, used only for High Quality vision).
     # NOTE: use the BARE ids — the earlier gemini-3.x-flash-HIGH names 404 on the
     # proxy; the real IDs have no "-high" suffix (reasoning is a separate param,
-    # thinkingConfig.thinkingLevel). They are health-gated, and gemini-2.5-flash is
-    # wired as the fast fallback for the high-volume tasks (notes, qc); gemini-2.5-flash
-    # / gemini-2.5-pro are always appended as the final safety net.
+    # thinkingConfig.thinkingLevel). They are health-gated. gemini-2.5-flash has
+    # been REMOVED from every chain (empty-prone); FALLBACK_2 defaults to empty,
+    # and gemini-3.6-flash / gemini-2.5-pro are appended as the final safety net.
     notes = (
         _env("NOTES_MODEL_PRIMARY", "gemini-3.5-flash"),
         _env("NOTES_MODEL_FALLBACK_1", "gemini-3.6-flash"),
-        _env("NOTES_MODEL_FALLBACK_2", "gemini-2.5-flash"),
+        _env("NOTES_MODEL_FALLBACK_2", ""),
     )
     vision = (
         _env("VISION_MODEL_PRIMARY", "gemini-3.5-flash"),
         _env("VISION_MODEL_FALLBACK_1", "gemini-3.6-flash"),
-        _env("VISION_MODEL_FALLBACK_2", "gemini-2.5-flash"),
+        _env("VISION_MODEL_FALLBACK_2", ""),
     )
     qc = (
         _env("QC_MODEL_PRIMARY", "gemini-3.5-flash"),
         _env("QC_MODEL_FALLBACK_1", "gemini-3.6-flash"),
-        _env("QC_MODEL_FALLBACK_2", "gemini-2.5-flash"),
+        _env("QC_MODEL_FALLBACK_2", ""),
     )
     classify = (notes[0], SAFETY_NET_FLASH)  # cheapest flash; never the Pro model
     try:
@@ -133,7 +152,6 @@ def load_routing_config() -> RoutingConfig:
         notes=notes, vision=vision, qc=qc, classify=classify,
         health_cache_minutes=cache_min,
         fallback_enabled=os.getenv("MODEL_FALLBACK_ENABLED", "true").lower() != "false",
-        use_pro_only_when_needed=os.getenv("USE_PRO_ONLY_WHEN_NEEDED", "true").lower() != "false",
     )
 
 
@@ -268,10 +286,49 @@ def _probe_one(model: str, probe: Probe) -> ModelHealth:
         return ModelHealth(model, False, None, str(e)[:200], tier, roles, label, time.time())
 
 
+def health_check_enabled() -> bool:
+    """Whether to spend real API calls probing model availability.
+
+    OFF by default. Each probe is a BILLED generateContent call per model
+    (visible in the Raw Usage Ledger as 1-token-input rows, ~0.45 INR per
+    cycle for three models) and it repeated on every app start and every
+    cache expiry — to answer a question that is almost always "yes". A model
+    that is genuinely down still surfaces at generation time, where the
+    fallback chain handles it. Set MODEL_HEALTH_CHECK=true to restore probing.
+    """
+    return (os.getenv("MODEL_HEALTH_CHECK", "false") or "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def assume_available(models: list[str]) -> dict[str, ModelHealth]:
+    """Synthetic 'everything is up' health — zero API calls.
+
+    latency_ms is None so recommend_mode()'s slow-probe check never fires on
+    made-up numbers; it simply keeps the configured mode.
+    """
+    now = time.time()
+    return {m: ModelHealth(m, True, None, None, cost_tier(m), _roles(m),
+                           model_label(m), now)
+            for m in models}
+
+
 def check_models(models: list[str], probe: Probe, cfg: RoutingConfig, *,
                  force: bool = False, max_workers: int = 4) -> dict[str, ModelHealth]:
     """Health-check `models`, reusing cached results within the TTL. Only the
-    stale/uncached models are probed, concurrently."""
+    stale/uncached models are probed, concurrently.
+
+    With MODEL_HEALTH_CHECK off (the default) NO probe call is made at all —
+    every model is assumed available. `force=True` still probes, so an explicit
+    user-triggered refresh keeps working.
+    """
+    if not force and not health_check_enabled():
+        assumed = assume_available(models)
+        # Cache it so peek_health() (the UI panel, the Auto-mode preview) sees
+        # the same answer without anyone reaching for the network.
+        ttl = cfg.health_cache_minutes * 60
+        for m, h in assumed.items():
+            _store(m, h, ttl)
+        return assumed
     ttl = cfg.health_cache_minutes * 60
     now = time.time()
     result: dict[str, ModelHealth] = {}
@@ -285,7 +342,12 @@ def check_models(models: list[str], probe: Probe, cfg: RoutingConfig, *,
     if to_probe:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(to_probe))) as ex:
             for m, health in zip(to_probe, ex.map(lambda mm: _probe_one(mm, probe), to_probe)):
-                _store(m, health, ttl)
+                # Cache SUCCESS for the full TTL, but let failures expire
+                # immediately: a cold-start probe can race the session-pass mint
+                # and fail every model at once — caching that verdict pinned
+                # "No Gemini model is available" for 15 minutes per click
+                # (test_failed_health_is_not_cached documents the contract).
+                _store(m, health, ttl if health.available else 0.0)
                 result[m] = health
     return result
 
@@ -444,6 +506,13 @@ def available_chain(task: str, mode: str, cfg: RoutingConfig,
         h = health.get(m)
         if h and h.available and m not in out:
             out.append(m)
+    # MODEL_FALLBACK_ENABLED=false pins each task to its primary model only.
+    # The flag was read into RoutingConfig and documented in .env.example /
+    # TEAM_RELEASE_NOTES but nothing consumed it — operators toggling it were
+    # toggling nothing. Trim AFTER health filtering so the "primary" is the
+    # first model that actually responds, not a dead one.
+    if not cfg.fallback_enabled and out:
+        return out[:1]
     return out
 
 

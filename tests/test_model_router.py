@@ -2,20 +2,27 @@
 Standalone: .venv\\Scripts\\python.exe tests\\test_model_router.py
 
 Config under test (src/model_router.load_routing_config defaults):
-  notes  = (3.5-flash, 3.6-flash, 2.5-flash)
-  vision = (3.5-flash, 3.6-flash, 2.5-flash)
-  qc     = (3.5-flash, 3.6-flash, 2.5-flash)
-  + safety net (2.5-flash, 2.5-pro) auto-appended to every task chain.
+  notes  = (3.5-flash, 3.6-flash)      # FALLBACK_2 empty; 2.5-flash removed
+  vision = (3.5-flash, 3.6-flash)
+  qc     = (3.5-flash, 3.6-flash)
+  + safety net (3.6-flash flash backstop, 2.5-pro dormant) appended to each chain.
   All modes (incl. High Quality) make notes/vision on gemini-3.5-flash.
+  gemini-2.5-flash is used NOWHERE; 2.5-pro is never health-probed.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import model_router as mr  # noqa: E402
+
+# Availability probing is OFF by default (it cost a billed call per model per
+# run). The tests below exercise probe/fallback semantics, so they opt in;
+# test_health_probing_is_off_by_default_and_costs_nothing covers the default.
+os.environ["MODEL_HEALTH_CHECK"] = "true"
 
 FAILS: list[str] = []
 
@@ -40,9 +47,11 @@ def make_probe(available: set[str], calls: dict | None = None):
     return probe
 
 
-# The flash models that appear in the configured chains (no Pro model now).
-CONFIGURED = {"gemini-3.5-flash", "gemini-3.6-flash", "gemini-2.5-flash"}
-SAFETY = {"gemini-2.5-flash", "gemini-2.5-pro"}
+# The flash models that appear in the configured chains (no Pro, no 2.5-flash).
+CONFIGURED = {"gemini-3.5-flash", "gemini-3.6-flash"}
+# 3.6-flash is the flash backstop (already configured); 2.5-pro is the only extra
+# safety-net id, and it is never health-probed (not in all_models()).
+SAFETY = {"gemini-2.5-pro"}
 ALLUP = CONFIGURED | SAFETY
 
 
@@ -115,15 +124,21 @@ def test_fallback_when_primary_down():
     ok("fallback: decision fallback_used", d.fallback_used is True)
 
 
-def test_falls_to_25flash_when_3x_down():
+def test_both_flash_down_raises():
     mr.clear_health_cache()
     c = cfg()
-    # All 3.x models down (the current proxy reality) — only 2.5 works.
-    h = mr.check_models(c.all_models(), make_probe({"gemini-2.5-flash"}), c)
-    d = mr.resolve(mr.BALANCED, c, h)
-    ok("safety: notes = 2.5-flash", d.notes.model == "gemini-2.5-flash", d.notes.model)
-    ok("safety: generation still resolvable", d.notes.available is True)
-    ok("safety: pro NOT used (cheap path)", d.pro_used is False)
+    # Both flash models down. 2.5-flash was removed and 2.5-pro is dormant
+    # (never probed), so there is no rescue — generation must report an outage
+    # rather than silently fall back to a removed/empty-prone model.
+    h = mr.check_models(c.all_models(), make_probe(set()), c)
+    try:
+        mr.resolve(mr.BALANCED, c, h)
+        ok("both-flash-down raises RouterError", False, "no exception")
+    except mr.RouterError:
+        ok("both-flash-down raises RouterError", True)
+    ok("no 2.5-flash anywhere in notes chain",
+       "gemini-2.5-flash" not in mr._effective_chain("notes", mr.BALANCED, c),
+       mr._effective_chain("notes", mr.BALANCED, c))
 
 
 def test_all_down_raises():
@@ -150,8 +165,8 @@ def test_manual_override():
     c = cfg()
     h = mr.check_models(c.all_models(), make_probe(ALLUP), c)
     # Override notes to a configured, health-up model that isn't the primary.
-    d = mr.resolve(mr.BALANCED, c, h, manual={"notes": "gemini-2.5-flash"})
-    ok("manual: notes overridden", d.notes.model == "gemini-2.5-flash", d.notes.model)
+    d = mr.resolve(mr.BALANCED, c, h, manual={"notes": "gemini-3.6-flash"})
+    ok("manual: notes overridden", d.notes.model == "gemini-3.6-flash", d.notes.model)
     ok("manual: override marked primary", d.notes.is_primary is True)
 
 
@@ -187,13 +202,13 @@ def test_recommend_slow_gives_fast():
     ok("recommend: fast reason mentions slow", "slow" in reason.lower())
 
 
-def test_recommend_only_25_balanced():
+def test_recommend_only_36_balanced():
     c = cfg()
-    h = _health(c, {"gemini-2.5-flash"}, latency_ms=90)   # only 2.5-flash up
+    h = _health(c, {"gemini-3.6-flash"}, latency_ms=90)   # only 3.6-flash up
     mode, reason = mr.recommend_mode(c, h)
-    ok("recommend: only 2.5 up -> Balanced", mode == mr.BALANCED, mode)
-    ok("recommend: notes resolves to 2.5-flash",
-       mr._select_task("notes", mr.BALANCED, c, h).model == "gemini-2.5-flash")
+    ok("recommend: only 3.6 up -> Balanced", mode == mr.BALANCED, mode)
+    ok("recommend: notes resolves to 3.6-flash",
+       mr._select_task("notes", mr.BALANCED, c, h).model == "gemini-3.6-flash")
 
 
 def test_recommend_nothing_up_reports_outage():
@@ -204,13 +219,114 @@ def test_recommend_nothing_up_reports_outage():
     ok("recommend: outage reason", "outage" in reason.lower() or "no notes" in reason.lower())
 
 
+def test_failed_health_is_not_cached():
+    """An outage verdict must never suppress the next probe.
+
+    A cold start probes every model concurrently while the 7-day session pass
+    is still being minted, so a slow/failed mint fails them all at once. When
+    that verdict was cached for the full 15 min TTL the app was stuck on "No
+    Gemini model is available" on every click — a restart just hit the same
+    race. Failures now expire immediately so the next attempt self-heals.
+    """
+    c = cfg()
+    mr.clear_health_cache()
+    calls = {}
+    mr.check_models(c.all_models(), make_probe(set(), calls), c)   # everything down
+    first = dict(calls)
+    ok("failed probe recorded", all(v == 1 for v in first.values()), first)
+
+    # Same call again, NO force: must genuinely re-probe, not replay the failure.
+    mr.check_models(c.all_models(), make_probe(set(c.all_models()), calls), c)
+    reprobed = {m: calls[m] - first.get(m, 0) for m in first}
+    ok("failure did not suppress re-probe", all(v == 1 for v in reprobed.values()), reprobed)
+
+    h = mr.peek_health(c.all_models())
+    ok("recovered after re-probe", all(v.available for v in h.values() if v))
+
+
+def test_successful_health_is_still_cached():
+    """The negative-TTL fix must not disable caching for healthy models."""
+    c = cfg()
+    mr.clear_health_cache()
+    calls = {}
+    up = set(c.all_models())
+    mr.check_models(c.all_models(), make_probe(up, calls), c)
+    mr.check_models(c.all_models(), make_probe(up, calls), c)   # should hit cache
+    ok("success cached (probed once, not twice)", all(v == 1 for v in calls.values()), calls)
+
+
+def test_safety_nets_are_probed_not_just_appended():
+    """Every model _effective_chain() may pick must appear in all_models().
+
+    _select_task() accepts a model only if health has an entry for it. The
+    safety nets were appended to each chain but never probed, so health.get()
+    returned None and they could never rescue a run: with both flash primaries
+    down the app raised "No available model for notes (tried: gemini-3.5-flash,
+    gemini-3.6-flash, gemini-2.5-pro)" — naming a model it had never tested.
+    """
+    c = cfg()
+    probed = set(c.all_models())
+    for task in ("notes", "vision", "qc", "classify"):
+        for mode in mr.MODES:
+            for m in mr._effective_chain(task, mode, c):
+                ok(f"safety net probed: {m} ({task}/{mode})", m in probed,
+                   f"{m} is selectable but never health-probed")
+
+
+def test_pro_safety_net_rescues_when_all_flash_is_down():
+    """With every flash model down, the Pro safety net must carry the run."""
+    c = cfg()
+    h = _health(c, {mr.SAFETY_NET_PRO})
+    d = mr.resolve(mr.BALANCED, c, h)
+    ok("pro safety net selected for notes", d.notes.model == mr.SAFETY_NET_PRO, d.notes.model)
+    ok("marked as a fallback", d.notes.fallback_used)
+    ok("notes reported available", d.notes.available)
+
+
+def test_health_probing_is_off_by_default_and_costs_nothing():
+    """Availability probing must make ZERO billed API calls by default.
+
+    Each probe was a real generateContent call per model — visible in the
+    Usage Cost sheet as 1-token-input rows (~0.45 INR per cycle for three
+    models), repeated on every app start and every 15-min cache expiry.
+    """
+    import os
+    c = cfg()
+    mr.clear_health_cache()
+    os.environ.pop("MODEL_HEALTH_CHECK", None)
+
+    def exploding(model):
+        raise AssertionError(f"probe called for {model} — that is a billed request")
+
+    h = mr.check_models(c.all_models(), exploding, c)
+    ok("no probe calls by default", True)
+    ok("all models reported available", all(v.available for v in h.values()))
+    d = mr.resolve(mr.BALANCED, c, h)
+    ok("routing still resolves a notes model", bool(d.notes.model), d.notes.model)
+    ok("peek_health serves the cached assumption", len(mr.peek_health(c.all_models())) == len(h))
+
+    # Opting back in must restore real probing.
+    os.environ["MODEL_HEALTH_CHECK"] = "true"
+    mr.clear_health_cache()
+    calls = {}
+    mr.check_models(c.all_models(), make_probe(set(c.all_models()), calls), c)
+    ok("MODEL_HEALTH_CHECK=true restores probing", sum(calls.values()) > 0, calls)
+    os.environ["MODEL_HEALTH_CHECK"] = "true"
+    mr.clear_health_cache()
+
+
 def main():
     for fn in [test_health_cache, test_balanced_routing, test_fast_routing,
                test_high_quality_routing, test_fallback_when_primary_down,
-               test_falls_to_25flash_when_3x_down, test_all_down_raises,
+               test_both_flash_down_raises, test_all_down_raises,
                test_classify_never_pro, test_manual_override,
                test_recommend_all_healthy_balanced, test_recommend_slow_gives_fast,
-               test_recommend_only_25_balanced, test_recommend_nothing_up_reports_outage]:
+               test_recommend_only_36_balanced, test_recommend_nothing_up_reports_outage,
+               test_safety_nets_are_probed_not_just_appended,
+               test_pro_safety_net_rescues_when_all_flash_is_down,
+               test_failed_health_is_not_cached,
+               test_successful_health_is_still_cached,
+               test_health_probing_is_off_by_default_and_costs_nothing]:
         fn()
     print()
     if FAILS:

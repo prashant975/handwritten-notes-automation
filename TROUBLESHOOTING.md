@@ -7,7 +7,7 @@ PW proxy (`pw_access.py`), which holds the key. Your `.env` only picks the model
 
 ```env
 MODEL_NAME=gemini-2.5-pro
-IMAGE_MODEL_NAME=gemini-2.5-flash-image
+IMAGE_MODEL_NAME=gemini-3.1-flash-image
 ```
 
 Access is per-user: your `@pw.live` email must be in the **Handwritten Notes

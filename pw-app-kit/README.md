@@ -1,109 +1,95 @@
-# PW App Onboarding Kit — Member Guide (START HERE)
+# PW App Kit v2 - Member Guide
 
-Connect your app to the **shared PW proxy** so it gets, with **zero API keys in
-your app**:
+Use this kit to connect an app to the shared PW proxy with zero provider API
+keys in the app.
 
-- ✅ per-user access control (app-wise whitelist)
-- ✅ automatic usage + cost logging
-- ✅ AI provider calls — **Gemini, Mathpix, Sarvam TTS, ElevenLabs TTS** — via the proxy
+What the kit gives you:
 
-The proxy holds all the keys. Your app just calls it with the signed-in user's
-Google token. Works for **any app**: local desktop, your own Vercel/Render, or a
-pure frontend/SPA.
+- per-user, per-app allowlist checks
+- provider calls through the shared proxy
+- proxy-side raw usage logging to MongoDB
+- sheet export to `Raw Usage Ledger Export`
+- 7-day proxy session pass so long runs do not fail after Google's token expiry
+- large Gemini/Claude request support through the proxy blob upload route
 
----
+The app sends only the signed-in user's Google token. The proxy verifies the
+user, checks the `Whitelisted` sheet, calls the provider with proxy-held keys,
+and logs trusted usage.
 
-## What's in this folder
+## Files
 
-| File | For | What it is |
-|---|---|---|
-| **README.md** | you (human) | this guide — start here |
-| **CONNECT-TO-PW-PROXY.md** | your AI assistant | the instruction file the AI follows to wire everything |
-| **pw_access.py** | Python backends | the client to copy in |
-| **pw_access.js** | Node backends + browsers/frontends | the client to copy in |
-| **verify_onboarding.py** | Python apps | one-command self-check |
-| **verify_onboarding.mjs** | JS / Node / frontend apps | one-command self-check |
-| **ONBOARD.md** | optional | a shorter TL;DR of this guide |
+| File | Purpose |
+|---|---|
+| `CONNECT-TO-PW-PROXY.md` | instruction file for the developer/AI assistant wiring the app |
+| `pw_access.py` | Python client for local apps and Python backends |
+| `pw_access.js` | JavaScript client for browser, Node, Vercel, and edge apps |
+| `verify_onboarding.py` | Python onboarding self-check |
+| `verify_onboarding.mjs` | JS onboarding self-check |
+| `ONBOARD.md` | short version of this guide |
 
----
-
-## Fixed facts (already set up — don't change)
+## Fixed Facts
 
 | Thing | Value |
 |---|---|
-| Proxy URL | `https://pw-apps-proxy.vercel.app` (already inside the client files) |
+| Proxy URL | `https://pw-apps-proxy.vercel.app` |
 | Control sheet | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
-| Allowed sign-in domain | `pw.live` |
-| Providers available | Gemini · Mathpix · Sarvam TTS · ElevenLabs TTS |
+| Allowed account domain | `pw.live` |
+| Raw export tab | `Raw Usage Ledger Export` |
+| Providers | Gemini text, Gemini TTS, Gemini image, Claude, Mathpix, Sarvam TTS, ElevenLabs TTS |
 
-## Before you start
-- Your app has (or will add) **Google Sign-in** for `@pw.live` users.
-- You can edit the **control sheet** (link above) to register your app.
-- Your app uses **Gemini / Mathpix / Sarvam TTS / ElevenLabs TTS**. Need another
-  provider (OpenAI, etc.)? Ping the proxy owner — it's a one-time add on the proxy.
+## What Changed In v2
 
----
+- Normal AI calls are logged by the proxy itself.
+- Apps should not use client-side combined logging for provider calls.
+- `log:false` is not part of the developer workflow.
+- `UsageSession.flush()` is now a compatibility no-op.
+- For multi-call tasks, apps should pass one `task_id` to every provider call.
+- Combining is done later from raw rows using `Task ID + App Name + Email + Model`.
 
-## The 4 steps
+## Human Steps
 
-### Step 1 — Register your app on the sheet
-Open the control sheet → **`Whitelisted`** tab → in **row 1**, add your app's
-**exact name** as a new column header → list your allowed users' emails down
-that column.
+1. Open the control sheet and go to `Whitelisted`.
+2. Add the exact app name as a new header in row 1.
+3. Add allowed `@pw.live` emails under that app column.
+4. Give the app project and this kit to the developer/AI assistant.
 
-Confirm it registered (open in a browser or curl):
+Use this prompt:
+
+```text
+Onboard this app to the PW proxy following pw-app-kit/CONNECT-TO-PW-PROXY.md.
+My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE".
+Set APP_NAME in the client, check allowlist before every paid/main action,
+route all provider calls through the pw_access helpers, remove all local
+provider API keys, and for any task with more than one AI call create one
+task_id and pass it to every call. Do not use client-side combined logging or
+UsageSession.flush() for new code. Run the verification and show me the result.
 ```
-https://pw-apps-proxy.vercel.app/api/apps
+
+## Task ID Pattern
+
+For a task with multiple calls:
+
+```python
+task_id = pw_access.new_task_id("final-zip")
+
+pw_access.gemini_generate(token, model="gemini-2.5-flash", request=req1, task_id=task_id)
+pw_access.mathpix_ocr(token, request=req2, task_id=task_id)
+pw_access.gemini_generate(token, model="gemini-2.5-flash", request=req3, task_id=task_id)
 ```
-Your app name should appear in the list.
 
-### Step 2 — Add this kit to your app
-Copy the whole **`pw-app-kit`** folder into your app's project.
+In the sheet, each raw call is a separate row. Your combined view can group by:
 
-### Step 3 — Tell your AI assistant (copy-paste this prompt)
-Open your AI assistant (Anti-Gravity) **in your app's project** and paste:
+`Task ID + App Name + Email + Model`
 
-> **Onboard this app to the PW proxy following `pw-app-kit/CONNECT-TO-PW-PROXY.md`. My APP_NAME is "PUT-YOUR-EXACT-APP-NAME-HERE". Add the client (`pw_access.py` for a Python backend, or `pw_access.js` for a Node backend / frontend), set APP_NAME, add the access check before every run, route ALL AI calls (Gemini/Mathpix/Sarvam/ElevenLabs) through the proxy, and — if a task makes more than one AI call — use a `UsageSession` so each provider logs ONE combined row per task. Pass the Google token as a token-provider FUNCTION (not a cached string) so the kit auto-refreshes it — Google tokens die after ~1 hour. Apply the login & session standards from the doc (7-day session, `@pw.live` only, deny on failure, don't auto-open the browser). Remove any local provider API keys from the code and .env, then run the verification and show me the result.**
+## Verify
 
-The AI does the wiring. It will **stop and ask you** only if your app name
-isn't on the sheet yet, or if it uses a provider the proxy doesn't have.
+- Python app: `python pw-app-kit/verify_onboarding.py .env`
+- JS app: `node pw-app-kit/verify_onboarding.mjs .env`
+- Live test: sign in as a whitelisted user, make one AI call, then check
+  `Raw Usage Ledger Export`.
 
-### Step 4 — Verify + test
-- **Python app:** from your backend folder, run
-  `python pw-app-kit/verify_onboarding.py .env` → should print **ALL GOOD**.
-- **JS app:** from the folder where you put `pw_access.js`, run (Node 18+)
-  `node verify_onboarding.mjs .env` → should print **ALL GOOD**.
-- **Live test:** sign in as a whitelisted user, do something that uses AI, and
-  check the sheet's **`Usage Cost`** tab for a new row.
+## Rule
 
-Done. Your app now ships no keys and logs every AI call centrally.
-
----
-
-## Which client + where it calls (auto-handled by the AI)
-
-| Your app | Client | Proxy is called from |
-|---|---|---|
-| Local desktop | `pw_access.py` | the local backend |
-| Hosted app with a backend (Vercel/Render/Node/FastAPI) | `pw_access.py` or `pw_access.js` | your hosted backend |
-| Pure frontend / static SPA | `pw_access.js` | the browser, directly |
-
-The proxy has open CORS + Bearer-token auth, so a browser can call it directly
-and safely — it only ever holds the user's *own* Google token, never a key.
-
----
-
-## Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `403 not authorized for <app>` | Your email isn't in your app's column on the `Whitelisted` tab. Add it. |
-| Your app isn't in `/api/apps` | App-name mismatch — it must match the sheet header **exactly** (spaces, case). |
-| Need OpenAI / another provider | Ask the proxy owner — one-time add on the proxy; then all apps can use it. |
-| App is Node / pure frontend | Use `pw_access.js` (same calls: `checkAllowed`, `geminiGenerate`, `mathpixOcr`, `sarvamTts`, `elevenLabsTts`). |
-| Works, then **401s after ~50–60 min** (long runs die mid-way) | The Google token expired — it only lives ~1 hour. Pass a **token-provider function** instead of a cached string; the kit then refreshes + retries automatically. See the header of `pw_access.py` / `pw_access.js`. |
-| Hosted on Vercel/Render/etc. | Works identically — see "Which client + where it calls" above. |
-
-## The one rule
-**Never put a provider API key in your app.** The proxy holds them all — that's
-what makes this safe, even for a public frontend.
+Never put Gemini, LiteLLM, Mathpix, Anthropic, Sarvam, ElevenLabs, OpenAI, or
+any other provider key in the app, `.env`, desktop build, frontend bundle, or
+shared repo.

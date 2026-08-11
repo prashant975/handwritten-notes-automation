@@ -16,6 +16,7 @@ from src.equation_quality import check_equations  # noqa: E402
 from src.equation_repair import repair_equations  # noqa: E402
 from src.math_renderer import (  # noqa: E402
     build_omath,
+    flatten_math_tags,
     latex_to_unicode,
     split_math_segments,
 )
@@ -163,6 +164,52 @@ def test_repair_never_touches_existing_tags():
 
 
 # --------------------------------------------------------------------------
+# Malformed / nested maths tags (the broken quadratic formula)
+# --------------------------------------------------------------------------
+# What the model actually emitted for the quadratic root: the sqrt argument was
+# wrapped in its OWN inline tag inside the outer block tag. The non-greedy tag
+# regex then split it wrong, leaking "[[MATH_INLINE:" and stray "}}{2a}".
+_NESTED_QUADRATIC = (
+    r"[[MATH_BLOCK: x = \frac{-b \pm \sqrt{[[MATH_INLINE: b^2 - 4ac]]}}{2a}]]"
+)
+_CLEAN_QUADRATIC = r"[[MATH_BLOCK: x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}]]"
+
+
+def test_flatten_math_tags():
+    # Nested tag collapses to one clean block tag.
+    check("flatten nested quadratic", flatten_math_tags(_NESTED_QUADRATIC), _CLEAN_QUADRATIC)
+    # Unclosed tag gets closed.
+    check("flatten unclosed tag",
+          flatten_math_tags("x = [[MATH_INLINE: a + b"), "x = [[MATH_INLINE: a + b]]")
+    # Already-clean text is untouched (idempotent).
+    check("flatten idempotent", flatten_math_tags(_CLEAN_QUADRATIC), _CLEAN_QUADRATIC)
+    # Two separate adjacent tags stay separate (no accidental merge).
+    two = "[[MATH_INLINE: a]][[MATH_INLINE: b]]"
+    check("flatten keeps adjacent tags", flatten_math_tags(two), two)
+    # Prose containing a stray ]] with no open tag is left intact.
+    check("flatten leaves prose ]]", flatten_math_tags("see item ]] here"), "see item ]] here")
+    # The cleaned tag now renders as real OMML (frac + radical), not leaked text.
+    seg = split_math_segments(flatten_math_tags(_NESTED_QUADRATIC))
+    check_true("flatten -> single block segment",
+               len(seg) == 1 and seg[0][0] == "block", seg)
+    from lxml import etree
+    om = build_omath(seg[0][1])
+    localnames = {etree.QName(e).localname for e in om.iter()} if om is not None else set()
+    check_true("flattened quadratic renders frac", "f" in localnames, localnames)
+    check_true("flattened quadratic renders radical", "rad" in localnames, localnames)
+
+
+def test_broken_tag_no_false_ocr_signal():
+    """A malformed formula tag must NOT read as an untagged formula (which would
+    needlessly trigger Mathpix OCR + regenerate on a maths deck)."""
+    fixed, _ = repair_equations("The roots are given by:\n" + _NESTED_QUADRATIC + "\n")
+    check_true("repair flattens the nested tag", _CLEAN_QUADRATIC in fixed, fixed)
+    check_true("no leaked inline marker", "[[MATH_INLINE:" not in fixed, fixed)
+    rep = check_equations(fixed)
+    check("no false untagged-formula issue", rep["issue_count"], 0)
+
+
+# --------------------------------------------------------------------------
 # Quality report
 # --------------------------------------------------------------------------
 def test_quality():
@@ -214,6 +261,8 @@ def main():
     test_repair_chem_units()
     test_repair_is_conservative()
     test_repair_never_touches_existing_tags()
+    test_flatten_math_tags()
+    test_broken_tag_no_false_ocr_signal()
     test_quality()
     test_exam_prompts()
     test_prompt_no_longer_forbids_latex()

@@ -50,11 +50,11 @@ def _reset():
         pw_auth._COOKIE_TOKENS.clear()
         pw_auth._LAST_EVENT.clear()
     pw_access.set_token_provider(None)
-    # Clear pw_access's process-wide caches so each test starts cold. Both the
-    # 7-day session pass and the Vertex token persist across calls by design, so
-    # without this a pass minted by one test would leak into the next.
+    # Clear pw_access's process-wide caches so each test starts cold. The 7-day
+    # session pass persists across calls by design, so without this a pass
+    # minted by one test would leak into the next. (The Vertex token cache is
+    # gone — the direct-Vertex path was removed in the kit's Gemini migration.)
     pw_access._invalidate_session()
-    pw_access._invalidate_vertex()
 
 
 # ---------------------------------------------------------------------------

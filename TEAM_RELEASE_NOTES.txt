@@ -1,5 +1,125 @@
 HANDWRITTEN NOTES AUTOMATION - TEAM RELEASE
-Build date: 23 July 2026
+Build date: 1 August 2026
+Version: v2.3.3
+
+THIS BUILD - RELIABILITY + HONEST DIAGNOSTICS
+---------------------------------------------
+Current, verified behaviour of this tree (earlier v2.3.x notes described a
+build that was rolled back; the statements below match the code as shipped):
+
+* Diagram redraw is ON by default (default processing mode is high_quality).
+  REDRAW_DIAGRAMS=false now REALLY turns it off (the env var previously
+  documented here was never read by any code — that is fixed).
+* Image calls make exactly ONE attempt (no retries, no empty-response
+  retries). A failed redraw falls back to the original slide crop instantly
+  instead of burning the 2+4+8+16+32s backoff per diagram. Text generation
+  keeps its full retry budget (6 transient attempts, 4 empty retries).
+* Redraw failures report the REAL reason per slide (quota vs empty response
+  vs invalid output), including what the model said instead of an image.
+* MODEL_FALLBACK_ENABLED=false now REALLY pins one model per task (this knob
+  was also documented-but-unread before).
+* PW_AI_IMAGE_WORKERS now REALLY controls redraw concurrency (default 4 —
+  the measured-good value; lower it if the image quota is tight).
+* The model health check still runs before generation, cached for
+  MODEL_HEALTH_CACHE_MINUTES (15). Only SUCCESS is cached: a failed probe
+  expires immediately, so one bad probe can no longer pin "No Gemini model
+  is available" for 15 minutes.
+* Proxy error bodies are truncated at 1200 chars (was 300), so a quota error
+  shows the provider's actual reason.
+
+HISTORY NOTE: the v2.3.x series was rolled back in full. Its notes claimed a
+"balanced" default mode, a removed model availability check (MODEL_HEALTH_CHECK
+never existed in code), and 2-attempt image calls — none of that describes this
+tree. The authoritative behaviour is the section above.
+
+DIAGRAM REDRAW - SLOW RATE-LIMITED RUNS FIXED
+---------------------------------------------
+* A rate-limited redraw used to cost ~62s PER SLIDE in pure retry sleeping.
+  Two causes, both fixed:
+  1. The quota breaker never tripped on a 429. It matched the text
+     "rate limit", but the app writes "rate-limited" (hyphen), so every 429
+     read as NOT-quota. The breaker exists to stop the whole run after the
+     first 429; instead every slide paid its own billed describe call to
+     rediscover the same limit. Matching now ignores hyphens.
+  2. The redraw "describe" stage is a TEXT call, so it inherited note
+     generation's 6-attempt budget (2+4+8+16+32s of backoff). A redraw is
+     optional - failure just keeps the original slide crop - so it now gets
+     2 attempts (~2s). Tune with PW_AI_DESCRIBE_RETRIES if ever needed.
+* Net effect: the first 429 stops all remaining redraws immediately (no
+  further calls, no further cost), and a slide that does hit a limit gives up
+  in ~2s instead of ~62s. Note generation is untouched and keeps its full
+  retry and empty-response budgets.
+
+DIAGRAM IMAGE FIXES
+* Diagram redraw is ON by default (high_quality mode). It is a
+  deliverable-quality requirement (raw slide crops are light-on-dark and
+  unusable), not a speed/quality knob. Opt out with REDRAW_DIAGRAMS=false.
+* Redrawn diagrams now have a TRANSPARENT background by default, so they blend
+  into the note page and the PW watermark shows through instead of sitting in
+  a white box.
+* A failed redraw now reports WHY in the run warnings (e.g. "Reason: proxy
+  error 429: image model rate limited"). Previously it failed silently and
+  looked identical to redraw being switched off.
+* Model availability errors now show the real cause on screen (401 auth vs 404
+  unknown model id vs proxy down) instead of a bare "Unavailable".
+
+* pw_access.py re-synced with pw-app-kit (adds Gemini image/TTS and Claude
+  calls through the proxy). APP_NAME stays "Handwritten Notes Automation".
+
+PW APP KIT v2 - USAGE LOGGING CHANGED
+------------------------------------
+* The proxy now writes ONE TRUSTED RAW ROW PER PROVIDER CALL, to the
+  "Raw Usage Ledger Export" tab. The old "Usage Cost" combined-row-per-file
+  model is gone, along with the client-side machinery that produced it
+  (UsageSession accumulation, log:false, the /api/usage-log write at the end
+  of a run). Nothing in the app posts usage any more.
+* Every run now creates ONE Task ID ("handwritten-notes-<uuid>") before its
+  first AI call and attaches it to every Gemini, Mathpix and image call that
+  run makes. To see what one file cost, group the ledger by
+  Task ID + App Name + Email + Model.
+* The Task ID is saved in the run's run_log.json / run_metadata.json and is
+  shown in the UI in developer mode, so a run can be traced to its rows.
+* Because logging is now proxy-side and per call, usage survives a run that
+  fails half-way — previously the combined row was only written at the end.
+* Allowlist checks are now LIVE (uncached) before every billed action: the
+  Generate click, "Test Gemini connection", and "Refresh Model Availability".
+  A user removed from the Whitelisted sheet mid-session is stopped at the next
+  paid action rather than up to 5 minutes later.
+* Diagram redraw uses gemini-3.1-flash-image.
+  gemini-3-pro-image is the slower, higher-quality alternative.
+
+PW_ACCESS APP ADDITIONS - RE-APPLY ON EVERY KIT SYNC
+---------------------------------------------------
+The stock kit file omits SEVEN things this app depends on. Each is marked
+"APP ADDITION (not in the stock kit)" in pw_access.py; re-add them whenever
+the kit is re-copied:
+  1. proxy_base_url()       - resolves the URL at call time, so a late
+                              load_dotenv is still honoured.
+  2. set_token_provider()   - process-wide fallback token provider.
+  3. _invalidate_session()  - drops the cached 7-day session pass so the next
+                              call mints a fresh one.
+  4. _resolve_token(force=) - tolerant: supports zero-arg providers, force-
+                              refresh, and fails closed instead of raising.
+  5. check_allowed_status() returns "expired" for 401 (the kit collapses it
+     into "error"); the auth layer needs it to trigger re-login.
+  6. PWAccessError.status_code, plus a lock around session-pass minting -
+     image redraws and note chunks run many threads, so an unguarded cold
+     start would mint one 7-day pass per thread instead of one per process.
+  7. gemini_generate(timeout=...) - per-call timeout override. The stock kit
+     hardcodes one value; without this parameter note generation raises
+     TypeError and the UI reports "No Gemini model is available for note
+     generation right now".
+  Also: _post() retries a 401 only when the refreshed token actually differs
+  (replaying a rejected token just buys a second 401).
+
+WARNING: a kit re-copy that drops these fails at RUNTIME, not at import. The
+symptom is "No Gemini model is available for note generation right now" with
+an AttributeError/TypeError in the details. Run the test suite after any sync.
+tests/test_pw_kit_contract.py now binds every pw_access call site in the app
+against the live signature, so a sync that drops a parameter fails the test
+suite instead of only failing at runtime.
+The kit's own README confirms the direct-Vertex path is permanently dead, so
+the removed Vertex helpers were NOT restored.
 
 PROBLEMS SOLVED
 ---------------

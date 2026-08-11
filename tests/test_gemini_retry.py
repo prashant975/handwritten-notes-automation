@@ -82,7 +82,7 @@ class _Harness:
         ai_client._REQUEST_SETTINGS = settings
         ai_client._REQUEST_GATE = ai_client.GeminiRequestGate(settings)
 
-        def fake_generate(token, *, model, request, session=None, **kw):
+        def fake_generate(token, *, model, request, task_id="", **kw):
             self.calls += 1
             self.models.append(model)
             # The client mutates the body in place across empty-retries, so snapshot
@@ -182,14 +182,15 @@ def test_empty_on_all_models_raises_naming_them():
     assert h.calls == 10, f"expected 5 per model x 2 models, got {h.calls}"
 
 
-def test_image_empty_retry_does_not_adapt_generation():
-    # Image redraw legitimately has no text; its responseModalities/config must be
-    # left untouched across empty-retries (no thinking clamp, no token widening).
+def test_image_request_config_is_never_adapted():
+    # Image redraw legitimately has no text, so the text-only empty-response
+    # adaptation (thinking clamp / token widening) must never touch its config.
     with _Harness([_empty_response(), _image_response()]) as h:
-        GeminiClient(TOKEN).generate_image("redraw", Path("nonexistent.png"))
-    assert h.calls == 2
-    # generate_image never sets maxOutputTokens or thinkingConfig, and the retry
-    # must not add them.
+        try:
+            GeminiClient(TOKEN).generate_image("redraw", Path("nonexistent.png"))
+        except GeminiError:
+            pass
+    # generate_image never sets maxOutputTokens or thinkingConfig.
     assert all("maxOutputTokens" not in c for c in h.gen_configs), h.gen_configs
     assert all("thinkingConfig" not in c for c in h.gen_configs), h.gen_configs
 
@@ -325,12 +326,19 @@ def test_image_response_is_not_treated_as_empty():
     assert h.calls == 1, "image responses (no text) must not trigger empty-retries"
 
 
-def test_image_empty_is_retried():
-    # An image request whose response has neither text nor inline data IS empty.
+def test_image_empty_is_NOT_retried():
+    """Diagram redraw makes exactly ONE attempt — no empty-response retries.
+
+    Redraw is optional (a failure falls back to the original slide crop), so
+    retrying only burns backoff. The image quota on this proxy is exhausted, so
+    every retry was guaranteed to fail anyway and cost minutes per run.
+    """
     with _Harness([_empty_response(), _image_response()]) as h:
-        data = GeminiClient(TOKEN).generate_image("redraw", Path("nonexistent.png"))
-    assert data == b"hi"
-    assert h.calls == 2
+        try:
+            GeminiClient(TOKEN).generate_image("redraw", Path("nonexistent.png"))
+        except GeminiError:
+            pass  # expected: gives up immediately instead of retrying
+    assert h.calls == 1, f"image call retried {h.calls} times; must be 1"
 
 
 if __name__ == "__main__":

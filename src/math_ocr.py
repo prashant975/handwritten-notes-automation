@@ -22,8 +22,13 @@ def _result_text(response: dict) -> str:
     return str(result.get("text") or result.get("latex_styled") or "").strip()
 
 
-def enrich_math_slides(slides, google_token, session, *, max_workers: int = 4):
-    """Append Mathpix OCR to image-backed slides and return non-fatal warnings."""
+def enrich_math_slides(slides, google_token, task_id: str = "", *, max_workers: int = 4):
+    """Append Mathpix OCR to image-backed slides and return non-fatal warnings.
+
+    `task_id` is the id of the run this OCR belongs to (see
+    pw_access.new_task_id). Every Mathpix call is logged by the proxy as its own
+    raw row; sharing the task id lets reporting group them with the run's Gemini
+    calls."""
     targets = [s for s in slides if s.image_path and Path(s.image_path).exists()]
     if not targets:
         return []
@@ -43,7 +48,7 @@ def enrich_math_slides(slides, google_token, session, *, max_workers: int = 4):
             },
             filename=path.name,
             count=1,
-            session=session,
+            task_id=task_id,
         )
         return slide, _result_text(response)
 
@@ -56,9 +61,12 @@ def enrich_math_slides(slides, google_token, session, *, max_workers: int = 4):
                     warnings.append(f"Math OCR returned no text for slide {slide.slide_no}; Gemini vision will read it.")
                     continue
                 slide.metadata["mathpix_text"] = text
-                original = (slide.text or "").strip()
-                slide.text = f"{original}\n\n[EQUATION OCR]\n{text}".strip()
-                slide.cleaned_text = slide.text
+                # Build on cleaned_text, NOT raw slide.text: the slide filter
+                # strips MCQ options/question blocks into cleaned_text, and
+                # rebuilding from the raw text re-inserted that stripped content
+                # into the AI prompt on every OCR-enriched chunk.
+                original = (slide.cleaned_text or slide.text or "").strip()
+                slide.cleaned_text = f"{original}\n\n[EQUATION OCR]\n{text}".strip()
             except Exception as exc:
                 warnings.append(f"Math OCR failed for one slide ({type(exc).__name__}); Gemini vision will read it.")
     return warnings

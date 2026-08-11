@@ -1,0 +1,132 @@
+========================================================================
+ HANDWRITTEN NOTES AUTOMATION  —  HOW TO USE  (Team Guide)
+========================================================================
+
+WHAT IT DOES
+------------
+Upload a lecture PDF or PowerPoint and it generates PW-style "Concise
+Notes" as a Word (.docx) and PDF file, with diagrams included.
+
+
+BEFORE YOU START (one-time)
+---------------------------
+1. You need a Windows 10 or 11 PC.
+
+2. Your @pw.live Google account must be approved for this app.
+   If you see "not authorized" when you sign in, message the person who
+   shared this app and ask them to add your @pw.live email to the
+   allowlist. (Only @pw.live accounts can use it.)
+
+3. For the PDF file: Microsoft Word OR LibreOffice should be installed
+   on the PC. If neither is installed you will still get the editable
+   Word (.docx) file — just not the PDF.
+
+4. (Optional) For the real handwritten look, install the free "Kalam"
+   font: https://fonts.google.com/specimen/Kalam  -> Download -> unzip
+   -> select the .ttf files -> right-click -> Install. If you skip this,
+   notes still generate, just in a normal font.
+
+
+INSTALL
+-------
+1. Unzip "HandwrittenNotesAppTeam_share.zip" to a folder you can find
+   (for example, your Desktop).
+   IMPORTANT: extract it fully first. Do NOT run the app from inside
+   the zip preview window.
+
+2. Open the extracted "HandwrittenNotesAppTeam" folder.
+
+
+RUN
+---
+1. Double-click "HandwrittenNotesAppTeam.exe".
+
+2. A black command window opens. After a few seconds your web browser
+   opens the app automatically (at http://localhost:8501).
+   - Keep the black window OPEN while you use the app. Closing it stops
+     the app.
+   - The very first launch can take 20-60 seconds. Please be patient.
+
+3. If Windows shows a blue "Windows protected your PC" box, click
+   "More info" -> "Run anyway". The app is safe; it just isn't
+   code-signed.
+
+
+SIGN IN
+-------
+1. Click "Continue with Google" and sign in with your @pw.live account.
+   Google asks you to confirm access the first time — say yes. That is what
+   lets the app keep your session alive without asking you to sign in again.
+2. If you see "not authorized for this app", your email hasn't been
+   added yet — ask the person who shared this app.
+3. You stay signed in for 7 DAYS — including after closing and reopening
+   the app. The sidebar shows "Auth status: OK" and how many days are left.
+   You do NOT need to sign out and back in to fix anything.
+
+4. If you ever see "Session expired" or "reconnect needed", click
+   "Reconnect Google" ONCE. Repeatedly signing out and in does not help
+   and is never required.
+
+5. Always open the app at  http://localhost:8501
+   NOT at http://127.0.0.1:8501 — your browser treats those as two
+   different sites, and a sign-in done on one is not recognised on the
+   other. The app now warns you if you land on the wrong address.
+
+
+GENERATE NOTES
+--------------
+1. Upload one or more files (PDF, PPTX, or PPT).
+2. Choose the SUBJECT (Biology, Physics, Chemistry, or Mathematics) and
+   the NOTES LANGUAGE (English or Hindi). Both are required.
+   - For a Hindi lecture, select "Hindi" here or the notes come out in
+     English.
+3. Click "Generate Concise Notes" and wait. Large files can take a
+   few minutes.
+4. For each file you can download:
+   - DOCX  (editable Word file)
+   - PDF   (needs Word or LibreOffice installed)
+   - ZIP   (everything from that run)
+
+   Files are named after your uploaded file, for example an upload named
+   "Structure_of_Atom_15.pdf" produces:
+       Structure_of_Atom_15_Concise_Notes.docx
+       Structure_of_Atom_15_Concise_Notes.pdf
+
+
+WHERE DO THE FILES GO?
+----------------------
+Your downloads go to your browser's usual Downloads folder. A copy of
+every run is also saved in the "outputs" and "runs" folders that sit
+next to the .exe.
+
+
+TROUBLESHOOTING
+---------------
+- "Port 8501 is already in use"
+      An old app window is still running. Close ALL
+      HandwrittenNotesAppTeam windows, then start it again.
+
+- The browser didn't open
+      Open your browser and go to:  http://localhost:8501
+
+- "not authorized for this app"
+      Ask the person who shared this app to add your @pw.live email to
+      the allowlist.
+
+- "Couldn't verify your access..." / it won't let you in
+      Usually a brief network or server hiccup. Wait a moment and click
+      again. Make sure you have internet access.
+
+- I only got a DOCX, no PDF
+      Install Microsoft Word or LibreOffice, then generate again. The
+      DOCX always works.
+
+- The notes are in a normal font, not handwriting
+      Install the free "Kalam" font (see step 4 above), then generate
+      again.
+
+
+NEED HELP?
+----------
+Contact the person who shared this app with you.
+========================================================================

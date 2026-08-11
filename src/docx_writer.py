@@ -26,6 +26,7 @@ from .math_renderer import (
     accent as _accent,
     add_block_math,
     add_inline_math,
+    flatten_math_tags,
     has_math_tag,
     split_math_segments,
 )
@@ -431,6 +432,32 @@ def _has_alpha(image_path: Path) -> bool:
         return False
 
 
+def _background_is_light(image_path: Path) -> bool:
+    """True when the image background is light enough for the white-to-alpha
+    treatment. On dark lecture-slide crops the near-white pixels are the TEXT,
+    so knocking them out erased the content; median luminance separates the two
+    (a white-background note is far above 128, a dark slide crop far below).
+    Fails open as False — when unsure, insert the image untouched."""
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            gray = im.convert("L")
+            hist = gray.histogram()
+        total = sum(hist)
+        if not total:
+            return False
+        half = total / 2
+        acc = 0
+        for level, count in enumerate(hist):
+            acc += count
+            if acc >= half:
+                return level >= 128   # median luminance
+        return False
+    except Exception:
+        return False
+
+
 def _pick_dtp_image(slide, run_dir: Path, region_cache: dict, used: dict):
     """Choose which image this DTP note should get.
 
@@ -475,7 +502,10 @@ def _insert_slide_image(doc: Document, image_path: Path, run_dir: Path, mode: st
     # Make the (near-)white background transparent so the diagram blends into the
     # note page instead of sitting in a white box. No-op for already-transparent
     # images; make_white_transparent returns the original on any failure.
-    if not _has_alpha(img):
+    # ONLY for light-background images: on a dark slide crop the near-white
+    # pixels ARE the text/diagram strokes, so the white-threshold alpha erased
+    # the content and kept the background. Dark crops are inserted as-is.
+    if not _has_alpha(img) and _background_is_light(img):
         img = make_white_transparent(img, run_dir / "inserted_images" / f"{Path(img).stem}_t.png")
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -497,6 +527,11 @@ def _normalize_math_tags(text: str) -> str:
     The model writes block maths across several lines; collapsing it first means
     the line-by-line writer below sees one complete equation per line.
     """
+    # Rebalance nested/unclosed tags first: MATH_TAG_RE (below) only matches
+    # well-formed tags, so a malformed one would otherwise leak its literal
+    # "[[MATH_INLINE:" and stray braces into the page.
+    text = flatten_math_tags(text)
+
     def repl(m):
         latex = " ".join(m.group(2).split())
         if m.group(1) == "BLOCK":

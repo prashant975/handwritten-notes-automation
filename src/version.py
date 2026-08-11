@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover
     pass
 
 APP_NAME = os.getenv("APP_NAME", "Handwritten Notes Automation")
-APP_VERSION = os.getenv("APP_VERSION", "v2.2.0")
+APP_VERSION = os.getenv("APP_VERSION", "v2.5.0")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 
 # IST is a fixed +05:30 offset (no DST) — a reliable fallback on any OS.

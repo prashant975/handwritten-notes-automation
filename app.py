@@ -144,7 +144,11 @@ def _proxy_access_status(force: bool = False) -> str:
 
 
 def _usage_logged(result) -> bool:
-    """Whether the PW proxy recorded this run in the Usage Cost sheet."""
+    """Whether this run made real (billed) proxy calls.
+
+    The proxy logs each provider call itself, as one raw row in `Raw Usage
+    Ledger Export` stamped with the run's Task ID — so a real run is recorded
+    by definition, and only a mock run is not."""
     return bool((result.metadata or {}).get("usage_logged"))
 
 
@@ -158,6 +162,11 @@ def _clear_local_auth_state(email: str = "", *, forget_refresh_token: bool = Tru
     email = email or _current_user_email()
     for key in ("_allow_cache", "_proxy_err_detail", "_admitted_email", "_auth_refresh_attempted"):
         st.session_state.pop(key, None)
+    # The 7-day proxy session pass lives in a process-wide global inside
+    # pw_access, NOT in st.session_state — without this, everything below
+    # clears the Google side while the next user of this machine keeps riding
+    # the previous identity's pass (allowlist + usage rows included).
+    pw_access._invalidate_session()
     if forget_refresh_token and email:
         pw_auth.forget_user(email)
 
@@ -895,6 +904,11 @@ def _model_probe():
 
 
 def _refresh_model_health(force: bool = True) -> None:
+    # A health probe sends a real (billed) generateContent ping per model, so it
+    # is a paid action and needs a live allowlist check, not the cached verdict.
+    if _proxy_access_status(force=True) != "allowed":
+        st.error("Not authorized for this app — the PW proxy denied this account.")
+        return
     cfg = mr.load_routing_config()
     try:
         mr.check_models(cfg.all_models(), _model_probe(), cfg, force=force)
@@ -985,12 +999,17 @@ with st.sidebar:
     if st.button("Sign out", key="sidebar_sign_out", use_container_width=True):
         _logout_user()
     if st.button("Test Gemini connection", key="sidebar_test_gemini", use_container_width=True):
-        with st.spinner("Testing Gemini via the PW proxy…"):
-            try:
-                resp = GeminiClient(_token_provider(), model=DEFAULT_MODEL).test_connection()
-                st.success(f"Gemini OK — {resp.model} via {resp.provider}.")
-            except Exception as exc:
-                st.error(f"Gemini test failed: {exc}")
+        # This makes a real, billed Gemini call, so it gets its own LIVE
+        # allowlist check rather than riding the 5-minute cached verdict.
+        if _proxy_access_status(force=True) != "allowed":
+            st.error("Not authorized for this app — the PW proxy denied this account.")
+        else:
+            with st.spinner("Testing Gemini via the PW proxy…"):
+                try:
+                    resp = GeminiClient(_token_provider(), model=DEFAULT_MODEL).test_connection()
+                    st.success(f"Gemini OK — {resp.model} via {resp.provider}.")
+                except Exception as exc:
+                    st.error(f"Gemini test failed: {exc}")
     st.divider()
     # Model routing is backend-controlled. The availability panel (status table,
     # manual override, refresh) is developer-only — hidden from end users, shown
@@ -1041,6 +1060,19 @@ DTP_POLICY = "hide_note_insert_image"
 IMAGE_MODE = "smart_crop"
 AI_REDRAW = True
 IMAGE_MODEL = DEFAULT_IMAGE_MODEL   # honours the IMAGE_MODEL_NAME env var
+
+
+def _redraw_enabled(profile_default: bool) -> bool:
+    """Honour the REDRAW_DIAGRAMS env var the team notes document.
+
+    The notes told operators to toggle redraw with REDRAW_DIAGRAMS, but nothing
+    ever read it — the mode profile silently won every time. Unset/blank keeps
+    the profile's value, so behaviour is unchanged until someone actually sets it.
+    """
+    raw = (os.getenv("REDRAW_DIAGRAMS") or "").strip().lower()
+    if not raw:
+        return profile_default
+    return raw in {"1", "true", "yes", "on"}
 
 if "results" not in st.session_state:
     st.session_state.results = []
@@ -1217,7 +1249,11 @@ with st.container(border=True):
     AUTO_SELECTED = PROCESSING_MODE == "auto"
     if AUTO_SELECTED:
         _cfg_preview = mr.load_routing_config()
-        _preview_health = mr.peek_health(_cfg_preview.all_models())
+        # peek_health never probes; with health checking off it is also never
+        # populated by a probe, so fall back to the assumed-available view
+        # rather than silently dropping to DEFAULT_MODE.
+        _preview_health = (mr.peek_health(_cfg_preview.all_models())
+                           or mr.assume_available(_cfg_preview.all_models()))
         _effective_mode = (mr.recommend_mode(_cfg_preview, _preview_health)[0]
                            if _preview_health else mr.DEFAULT_MODE)
     else:
@@ -1249,10 +1285,17 @@ if run_button and uploaded_files:
     # Validate auth ONCE, here, before generation starts — never during the run
     # and never per file write. A mid-run auth check is what used to abandon a
     # half-finished batch.
+    #
+    # force=True: the kit requires a LIVE allowlist check before every paid
+    # action, because a user can be removed from the Whitelisted sheet
+    # mid-session. The 5-minute cache is fine for deciding what to render, but
+    # this click is what starts billing (the model health probe below already
+    # makes real Gemini calls), so it must not ride a stale "allowed".
+    # (This check already runs AFTER _ensure_fresh_session and is live, so an
+    # "expired" verdict here means renewal genuinely failed — re-asking the
+    # proxy a second time could only return the same answer.)
     refreshed_ok, refresh_message = _ensure_fresh_session()
-    access_status = _proxy_access_status()
-    if access_status == "expired" and refreshed_ok:
-        access_status = _proxy_access_status(force=True)
+    access_status = _proxy_access_status(force=True)
     authorized = access_status == "allowed"
 
     if access_status == "denied":
@@ -1331,14 +1374,25 @@ if run_button and uploaded_files:
                     st.write(f"⏳ Reading pages and generating notes for **{uploaded.name}**…")
                     tmp_path = Path(tmpdir) / uploaded.name
                     tmp_path.write_bytes(uploaded.getbuffer())
+                    # Chunk generation runs on worker threads, where st.write has
+                    # no ScriptRunContext and silently drops the message — every
+                    # retry notice vanished. Collect them instead and show them
+                    # from the main thread once the file finishes.
+                    retry_notices: list[str] = []
                     try:
                         result = run_pipeline(
                             tmp_path, subject=SUBJECT, language=LANGUAGE, mode=MODE,
                             google_token=google_token, model=decision.notes.model,
-                            send_images_to_ai=analyze_images, strict_filter=STRICT_FILTER,
+                            # From run_profile, NOT the preview-time analyze_images:
+                            # Auto mode can re-pick the mode after health probing,
+                            # and the vision flag must follow the mode the run
+                            # actually reports (its siblings redraw/qc already do).
+                            send_images_to_ai=run_profile.vision_default_on,
+                            strict_filter=STRICT_FILTER,
                             allow_mock=False, image_insert_mode=IMAGE_MODE, dtp_note_policy=DTP_POLICY,
-                            ai_redraw_diagrams=run_profile.redraw_diagrams, image_model=IMAGE_MODEL,
-                            retry_callback=st.write,
+                            ai_redraw_diagrams=_redraw_enabled(run_profile.redraw_diagrams),
+                            image_model=IMAGE_MODEL,
+                            retry_callback=retry_notices.append,
                             exam=EXAM, strict_math=STRICT_MATH,
                             math_render_mode=MATH_RENDER_MODE,
                             processing_mode=run_mode,
@@ -1359,6 +1413,14 @@ if run_button and uploaded_files:
                     except Exception as e:
                         st.session_state.results.append({"name": uploaded.name, "error": f"Processing failed: {e}", "notes": "", "run_dir": None})
                         st.write(f"❌ Failed **{uploaded.name}**")
+                    if retry_notices:
+                        # Main thread again — safe to render. Dedupe repeats and
+                        # cap the list so a stormy run can't flood the status box.
+                        shown = list(dict.fromkeys(retry_notices))[:6]
+                        st.caption(
+                            f"⚠️ {len(retry_notices)} retry/fallback notice(s) during this file — "
+                            + " · ".join(shown)
+                        )
                     progress.progress(i / total, text=f"[{i}/{total}] {uploaded.name}")
             ok = sum(1 for r in st.session_state.results if not r.get("error"))
             status.update(
@@ -1379,9 +1441,9 @@ if results:
                 st.error(r["error"])
                 continue
             if r.get("usage_logged") is True:
-                st.caption("Usage tracked in the PW Usage Cost sheet.")
-            elif r.get("usage_logged") is False:
-                st.warning("Usage logging failed on the PW proxy — this run was not recorded in the Usage Cost sheet.")
+                st.caption("Usage tracked in the PW Raw Usage Ledger.")
+                if _developer_mode() and (r.get("run_summary") or {}).get("task_id"):
+                    st.caption(f"Task ID: `{r['run_summary']['task_id']}`")
             # ---- Run summary: time + cost transparency ----
             _rs = r.get("run_summary") or {}
             if _rs:
