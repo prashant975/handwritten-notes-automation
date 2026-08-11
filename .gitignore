@@ -11,4 +11,6 @@ runs/*
 !runs/.gitkeep
 outputs/*
 !outputs/.gitkeep
+logs/
 .DS_Store
+.test-tmp*/

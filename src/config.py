@@ -19,15 +19,16 @@ if load_dotenv:
 # The env vars below only pick which model the proxy should call — they are NOT
 # secrets. They are named without a provider prefix so the onboarding key-scan
 # never mistakes them for a leaked key.
-DEFAULT_MODEL = (os.getenv("MODEL_NAME") or os.getenv("GEMINI_MODEL", "gemini-2.5-pro")).strip() or "gemini-2.5-pro"
-DEFAULT_IMAGE_MODEL = (os.getenv("IMAGE_MODEL_NAME") or os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")).strip() or "gemini-2.5-flash-image"
+DEFAULT_MODEL = (os.getenv("MODEL_NAME") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")).strip() or "gemini-3.5-flash"
+DEFAULT_IMAGE_MODEL = (os.getenv("IMAGE_MODEL_NAME") or os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")).strip() or "gemini-3.1-flash-image"
 
 RUNS_DIR = Path(os.getenv("RUNS_DIR", str(ROOT_DIR / "runs"))).expanduser()
 OUTPUTS_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT_DIR / "outputs"))).expanduser()
 APP_NAME = os.getenv("APP_NAME", "Handwritten Notes Automation")
-# Shown in the UI so stale team installs are identifiable at a glance.
-# Bump when sharing a new team build.
-APP_VERSION = "2026.07.20"
+# Build stamp — shown in the sidebar so stale team installs are identifiable at
+# a glance. Bump when sharing a new team build. The semantic app version shown
+# in the header ("Version: v2.1.0") lives in src/version.py.
+APP_VERSION = "2026.08.08"
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
@@ -46,3 +47,15 @@ MATH_RENDER_MODES = {
     "Plain text debug": "plain",
 }
 DEFAULT_MATH_RENDER_MODE = "omml"
+
+# Processing speed modes (see src/model_router.py). "Auto" is the default: the
+# app health-checks the models and picks Fast/Balanced for you.
+PROCESSING_MODES = {
+    "Auto (Recommended)": "auto",
+    "Fast Mode": "fast",
+    "Balanced Mode": "balanced",
+    "High Quality Mode": "high_quality",
+}
+DEFAULT_PROCESSING_MODE = (os.getenv("PROCESSING_MODE", "high_quality") or "high_quality").strip().lower()
+# "auto" = router picks the model per task; "manual" = user chooses in the UI.
+MODEL_ROUTING_MODE = (os.getenv("MODEL_ROUTING_MODE", "auto") or "auto").strip().lower()

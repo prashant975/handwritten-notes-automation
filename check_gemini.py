@@ -27,8 +27,10 @@ def main():
 
     status = pw_access.check_allowed_status(token)
     print(f"Allowlist status: {status}")
+    if status == "expired":
+        raise SystemExit("Token expired or invalid — grab a fresh Google token and retry.")
     if status != "allowed":
-        raise SystemExit("Not allowed (or proxy/token error). Fix access before testing generation.")
+        raise SystemExit("Not allowed (or proxy unreachable). Fix access before testing generation.")
 
     client = GeminiClient(token, model=args.model)
     resp = client.test_connection()

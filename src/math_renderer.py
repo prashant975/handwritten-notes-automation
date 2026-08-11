@@ -66,6 +66,70 @@ def strip_math_tags(text: str) -> str:
     return MATH_TAG_RE.sub(lambda m: m.group(2).strip(), text)
 
 
+# A maths-tag opener, matched anywhere (well-formed OR nested/unclosed). Used by
+# flatten_math_tags to rebalance tags the non-greedy MATH_TAG_RE can't parse.
+_TAG_OPEN_RE = re.compile(r"\[\[MATH_(INLINE|BLOCK)\s*:\s*")
+
+
+def flatten_math_tags(text: str) -> str:
+    """Collapse nested / unclosed maths tags so exactly one clean level survives.
+
+    Models sometimes wrap a sub-expression in its own ``[[MATH_INLINE: ...]]``
+    *inside* an outer formula tag, e.g.::
+
+        [[MATH_BLOCK: x = \\frac{-b \\pm \\sqrt{[[MATH_INLINE: b^2 - 4ac]]}}{2a}]]
+
+    or drop a closing ``]]`` entirely. The non-greedy :data:`MATH_TAG_RE` then
+    matches the wrong boundary, leaking a literal ``[[MATH_INLINE:`` and stray
+    braces (``}}{2a}``) into the DOCX — the classic broken quadratic formula.
+
+    This walks the text with a depth counter, keeping only the OUTERMOST
+    opener/closer of each tag, dropping nested markers, and closing any tag left
+    open at end of text. A stray ``]]`` with no open tag is left untouched so
+    ordinary prose is never harmed. Idempotent: clean text passes through
+    unchanged.
+    """
+    out: list[str] = []
+    depth = 0
+    kind = ""            # INLINE or BLOCK of the outermost open tag
+    i = 0
+    n = len(text)
+    while i < n:
+        m = _TAG_OPEN_RE.match(text, i)
+        if m:
+            depth += 1
+            if depth == 1:
+                kind = m.group(1)
+                out.append(m.group(0))        # keep the outer opener verbatim
+            # nested opener (depth > 1): drop the marker, keep the LaTeX after it
+            i = m.end()
+            continue
+        if text.startswith("]]", i):
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    out.append("]]")          # close the outer tag
+                # nested closer (depth still > 0): drop it
+            else:
+                out.append("]]")              # not inside a tag: leave prose intact
+            i += 2
+            continue
+        # An unclosed tag must not swallow the rest of the document: one
+        # dropped "]]" used to collapse every following bullet and heading
+        # into a single giant equation. An INLINE tag never legitimately
+        # crosses a line break, and a BLOCK never crosses a blank line —
+        # close at those boundaries instead of at end-of-text.
+        if depth > 0 and text[i] == "\n":
+            if kind == "INLINE" or text.startswith("\n\n", i):
+                out.append("]]")
+                depth = 0
+        out.append(text[i])
+        i += 1
+    if depth > 0:
+        out.append("]]")                      # unclosed outer tag -> close it
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------
 # Symbol tables (canonical — docx_writer imports these)
 # --------------------------------------------------------------------------
@@ -86,6 +150,12 @@ LATEX_SYMBOLS = {
     "approx": "≈", "equiv": "≡", "propto": "∝", "infty": "∞", "cong": "≅",
     "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒",
     "leftrightarrow": "↔", "Leftrightarrow": "⇔", "implies": "⇒", "iff": "⇔",
+    # Long arrows + the chemistry equilibrium arrow. These rendered as literal
+    # words ("longrightarrow", "rightleftharpoons") in the final DOCX before.
+    "longrightarrow": "⟶", "Longrightarrow": "⟹", "longleftarrow": "⟵",
+    "Longleftarrow": "⟸", "longleftrightarrow": "⟷", "Longleftrightarrow": "⟺",
+    "rightleftharpoons": "⇌", "leftharpoonup": "↼", "rightharpoonup": "⇀",
+    "uparrow": "↑", "downarrow": "↓",
     "sum": "Σ", "prod": "Π", "int": "∫", "oint": "∮", "partial": "∂", "nabla": "∇",
     "degree": "°", "circ": "°", "angle": "∠", "perp": "⊥", "parallel": "∥",
     "therefore": "∴", "because": "∵", "sqrt": "√", "cdots": "⋯", "ldots": "…",
@@ -126,6 +196,17 @@ FUNCTIONS = {
 
 # Commands that only add space.
 _SPACING_CMDS = {",", ";", ":", "!", " ", "quad", "qquad", "thinspace", "medspace"}
+
+# Print-layout commands with no textual content. Falling through to the
+# unknown-command branch made them appear as literal words in equations.
+_SILENT_CMDS = {
+    "displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle",
+    "limits", "nolimits",
+    "big", "Big", "bigg", "Bigg",
+    "bigl", "Bigl", "biggl", "Biggl",
+    "bigr", "Bigr", "biggr", "Biggr",
+    "bigm", "Bigm", "biggm", "Biggm",
+}
 # Commands that wrap one argument that should be rendered as literal text.
 _TEXT_WRAPPERS = {"text", "textbf", "textit", "mathrm", "mathbf", "mathit",
                   "mathsf", "operatorname", "textrm"}
@@ -298,6 +379,18 @@ class _Parser:
             # Keep the delimiter that follows, drop a "\left." placeholder.
             if self._peek()[0] == "ch" and self._peek()[1] == ".":
                 self.i += 1
+            return None
+        if name in _SILENT_CMDS:
+            # Sizing/style commands (\Big, \displaystyle, ...) affect only
+            # print layout; the delimiter/content that follows stays. They used
+            # to fall through to the unknown-command branch and appear as
+            # literal words ("Big(", "displaystyle") in the rendered equation.
+            return None
+        if name in {"begin", "end"}:
+            # \begin{aligned}/\end{aligned} etc.: swallow the environment-name
+            # group so "begin"/"aligned" never leak into the equation text.
+            if self._peek()[0] == "{":
+                self.parse_one()
             return None
         if name in _SPACING_CMDS:
             return ("txt", " ")

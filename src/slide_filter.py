@@ -10,9 +10,41 @@ HOUSEKEEPING_PATTERNS = [
     r"\byakeen\s+neet\s+module\b", r"\bexercise\s*[-–]\s*\d+\b",
 ]
 
+HOUSEKEEPING_PATTERNS.extend([
+    r"\blet[’']?s\s+grow\s+together\b", r"\bfollow\s+(me|us)\b", r"\bsocial\s+media\b",
+    r"\binstagram\b", r"\bwhats\s*app\b", r"@[a-z0-9_.]{3,}",
+    r"(?:\+?91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}",
+])
+
+QUESTION_PATTERNS = [
+    r"\bASQ\s*[-:]?\s*\d+\b", r"\bMCQ\s*[-:]?\s*\d*\b",
+    r"\bpractice\s+(question|problem)\b", r"\bquestion\s*[-:#]?\s*\d+\b",
+    r"\b(single|multiple)\s+correct\b", r"\bchoose\s+the\s+correct\b",
+    r"\bthen\s+the\s+value\s+of\b", r"\bthe\s+value\s+of\s+(?:the\s+)?(?:expression|following)\b",
+    r"\bis\s+equal\s+to\s*[:?]", r"\boptions?\s*[:\-]",
+]
+
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
     return any(re.search(p, text, flags=re.I | re.M) for p in patterns)
+
+
+def unwanted_slide_reason(slide: SlideData, *, strict: bool = True) -> str | None:
+    """Classify slides that must never become inserted note images.
+
+    This public classifier is intentionally reused by both the early AI filter
+    and the final DOCX insertion gate.  A filtered QR/ASQ slide therefore
+    cannot re-enter through a hallucinated ``Note to DTP`` reference.
+    """
+    text = "\n".join([slide.heading or "", slide.text or "", slide.cleaned_text or ""])
+    if _matches_any(text, HOUSEKEEPING_PATTERNS):
+        if not re.search(r"topics?\s+to\s+be\s+covered|concepts?\s+covered", text, flags=re.I):
+            return "housekeeping/promotion/homework"
+    if strict and _matches_any(text, QUESTION_PATTERNS):
+        return "question/MCQ/worked-example slide"
+    if slide.filtered and slide.filter_reason:
+        return slide.filter_reason
+    return None
 
 
 def _strip_question_blocks(text: str) -> tuple[str, bool]:
@@ -56,11 +88,7 @@ def filter_slides(slides: list[SlideData], strict: bool = True) -> tuple[list[Sl
     report: list[dict] = []
     for slide in slides:
         s = deepcopy(slide)
-        text_for_filter = "\n".join([s.heading or "", s.text or ""])
-        reason = None
-        if _matches_any(text_for_filter, HOUSEKEEPING_PATTERNS):
-            if not re.search(r"topics?\s+to\s+be\s+covered|concepts?\s+covered", text_for_filter, flags=re.I):
-                reason = "housekeeping/promotion/homework"
+        reason = unwanted_slide_reason(s, strict=strict)
         cleaned, removed_questions = _strip_question_blocks(s.text)
         s.cleaned_text = cleaned if strict else (s.text or cleaned)
         if reason:
